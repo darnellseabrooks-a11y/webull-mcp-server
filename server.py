@@ -1,18 +1,23 @@
 import os
+import uuid
 import hmac
 import hashlib
 import base64
-import uuid
 import json
 import httpx
 from datetime import datetime, timezone
 from mcp.server.fastmcp import FastMCP
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse, RedirectResponse, HTMLResponse
+from starlette.routing import Route
 
 APP_KEY    = os.environ.get("WEBULL_APP_KEY", "")
 APP_SECRET = os.environ.get("WEBULL_APP_SECRET", "")
 TOKEN      = os.environ.get("WEBULL_TOKEN", "")
 ACCOUNT_ID = os.environ.get("WEBULL_ACCOUNT_ID", "")
 BASE_URL   = os.environ.get("WEBULL_BASE_URL", "https://us-openapi-alb.uat.webullbroker.com")
+SERVER_URL = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "localhost:8000")
 
 mcp = FastMCP("Webull Trading Assistant")
 
@@ -64,14 +69,7 @@ def get_orders() -> str:
 
 @mcp.tool()
 def place_order(symbol: str, action: str, quantity: int, order_type: str = "MKT", limit_price: float = 0.0) -> str:
-    """
-    Place a stock order on Webull.
-    symbol: ticker e.g. AAPL
-    action: BUY or SELL
-    quantity: number of shares
-    order_type: MKT or LMT
-    limit_price: required if LMT
-    """
+    """Place a stock order. action=BUY or SELL, order_type=MKT or LMT."""
     path = f"/openapi/trade/v2/{ACCOUNT_ID}/orders"
     body = {"symbol": symbol, "action": action, "orderType": order_type, "quantity": quantity}
     if order_type == "LMT":
@@ -87,5 +85,51 @@ def cancel_order(order_id: str) -> str:
     r = httpx.post(BASE_URL + path, headers=sign("POST", path), timeout=10)
     return r.text
 
+async def oauth_metadata(request: Request):
+    base = f"https://{SERVER_URL}"
+    return JSONResponse({
+        "issuer": base,
+        "authorization_endpoint": f"{base}/oauth/authorize",
+        "token_endpoint": f"{base}/oauth/token",
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code"],
+        "code_challenge_methods_supported": ["S256"],
+    })
+
+async def oauth_authorize(request: Request):
+    redirect_uri = request.query_params.get("redirect_uri", "")
+    state = request.query_params.get("state", "")
+    code = "webull-auth-code-" + str(uuid.uuid4())
+    return RedirectResponse(url=f"{redirect_uri}?code={code}&state={state}")
+
+async def oauth_token(request: Request):
+    return JSONResponse({
+        "access_token": "webull-static-token",
+        "token_type":   "bearer",
+        "expires_in":   86400,
+    })
+
+async def homepage(request: Request):
+    return HTMLResponse("<h2>Webull MCP Server is running.</h2>")
+
+oauth_routes = [
+    Route("/", homepage),
+    Route("/.well-known/oauth-authorization-server", oauth_metadata),
+    Route("/oauth/authorize", oauth_authorize),
+    Route("/oauth/token", oauth_token, methods=["POST", "GET"]),
+]
+
+oauth_app = Starlette(routes=oauth_routes)
+mcp_app   = mcp.streamable_http_app()
+
+async def combined_app(scope, receive, send):
+    path = scope.get("path", "")
+    if path.startswith("/mcp"):
+        await mcp_app(scope, receive, send)
+    else:
+        await oauth_app(scope, receive, send)
+
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http")
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(combined_app, host="0.0.0.0", port=port)

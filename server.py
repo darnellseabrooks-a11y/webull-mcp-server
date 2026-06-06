@@ -104,9 +104,11 @@ async def oauth_authorize(request: Request):
 
 async def oauth_token(request: Request):
     return JSONResponse({
-        "access_token": "webull-static-token",
-        "token_type":   "bearer",
-        "expires_in":   86400,
+        "access_token":  "webull-static-token-" + str(uuid.uuid4()),
+        "token_type":    "bearer",
+        "expires_in":    86400,
+        "scope":         "read write",
+        "refresh_token": "webull-refresh-" + str(uuid.uuid4()),
     })
 
 async def homepage(request: Request):

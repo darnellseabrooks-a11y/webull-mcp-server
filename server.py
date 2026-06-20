@@ -150,6 +150,7 @@ app = Starlette(
         Route("/oauth/authorize", oauth_authorize),
         Route("/oauth/token", oauth_token, methods=["POST", "GET"]),
         Mount("/mcp", app=mcp_app),
+        Mount("/mcp/", app=mcp_app),
     ],
     lifespan=mcp_app.router.lifespan_context,
 )

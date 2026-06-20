@@ -6,7 +6,6 @@ import hmac
 import hashlib
 import base64
 from datetime import datetime, timezone
-from contextlib import asynccontextmanager
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -96,7 +95,6 @@ def cancel_order(order_id: str) -> str:
     r = httpx.post(BASE_URL + path, headers=sign("POST", path), timeout=10)
     return r.text
 
-# OAuth handlers
 async def oauth_metadata(request: Request):
     base = f"https://{SERVER_URL}"
     return JSONResponse({
@@ -136,7 +134,7 @@ async def oauth_token(request: Request):
     })
 
 async def homepage(request: Request):
-    return HTMLResponse("<h2>Webull MCP Server ✅</h2>")
+    return HTMLResponse("<h2>Webull MCP Server is running.</h2>")
 
 oauth_routes = [
     Route("/", homepage),
@@ -146,4 +144,16 @@ oauth_routes = [
     Route("/oauth/token", oauth_token, methods=["POST", "GET"]),
 ]
 
+oauth_app = Starlette(routes=oauth_routes)
+
+async def combined_app(scope, receive, send):
+    path = scope.get("path", "")
+    if path.startswith("/mcp"):
+        mcp_app = mcp.streamable_http_app()
+        await mcp_app(scope, receive, send)
+    else:
+        await oauth_app(scope, receive, send)
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
     uvicorn.run(combined_app, host="0.0.0.0", port=port)

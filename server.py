@@ -6,8 +6,6 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, HTMLResponse
 from starlette.routing import Route
-from webull.core.http.initializer.token.token_storage import FileTokenStorage
-from webull.core.client import ApiClient
 from mcp.server.fastmcp import FastMCP
 
 APP_KEY    = os.environ.get("WEBULL_APP_KEY", "")

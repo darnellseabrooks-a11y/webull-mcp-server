@@ -146,15 +146,4 @@ oauth_routes = [
     Route("/oauth/token", oauth_token, methods=["POST", "GET"]),
 ]
 
-oauth_app = Starlette(routes=oauth_routes)
-
-# Use FastMCP's built-in HTTP app with proper lifespan
-app = mcp.http_app(path="/mcp")
-
-# Mount OAuth routes onto the MCP app
-for route in oauth_routes:
-    app.router.routes.insert(0, route)
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(combined_app, host="0.0.0.0", port=port)

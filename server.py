@@ -2,11 +2,17 @@ import os
 import uuid
 import json
 import httpx
+import hmac
+import hashlib
+import base64
+from datetime import datetime, timezone
+from contextlib import asynccontextmanager
+from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, HTMLResponse
 from starlette.routing import Route
-from mcp.server.fastmcp import FastMCP
+import uvicorn
 
 APP_KEY    = os.environ.get("WEBULL_APP_KEY", "")
 APP_SECRET = os.environ.get("WEBULL_APP_SECRET", "")
@@ -17,12 +23,10 @@ SERVER_URL = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "localhost:8000")
 
 mcp = FastMCP("Webull Trading Assistant")
 
-def get_headers():
-    import hmac, hashlib, base64, time, datetime
-    from datetime import timezone
-    ts    = datetime.datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def sign(method, path, body_str=""):
+    ts    = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     nonce = str(uuid.uuid4()).replace("-", "")
-    src   = "\n".join(["GET", "/", ts, nonce, ""])
+    src   = "\n".join([method, path, ts, nonce, body_str])
     sig   = base64.b64encode(
         hmac.new(APP_SECRET.encode(), src.encode(), hashlib.sha1).digest()
     ).decode()
@@ -40,50 +44,56 @@ def get_headers():
 @mcp.tool()
 def get_account_info() -> str:
     """Get Webull account balance and buying power."""
-    r = httpx.get(f"{BASE_URL}/openapi/account/v2/account/list", headers=get_headers(), timeout=10)
+    path = "/openapi/account/v2/account/list"
+    r = httpx.get(BASE_URL + path, headers=sign("GET", path), timeout=10)
     return r.text
 
 @mcp.tool()
 def get_positions() -> str:
     """Get current stock and options positions."""
-    r = httpx.get(f"{BASE_URL}/openapi/account/v2/{ACCOUNT_ID}/positions", headers=get_headers(), timeout=10)
+    path = f"/openapi/account/v2/{ACCOUNT_ID}/positions"
+    r = httpx.get(BASE_URL + path, headers=sign("GET", path), timeout=10)
     return r.text
 
 @mcp.tool()
 def get_quote(symbol: str) -> str:
     """Get real-time quote for a stock symbol e.g. AAPL, TSLA, SPY."""
-    r = httpx.get(f"{BASE_URL}/openapi/quote/v1/ticker/snapshot?symbols={symbol}", headers=get_headers(), timeout=10)
+    path = f"/openapi/quote/v1/ticker/snapshot?symbols={symbol}"
+    r = httpx.get(BASE_URL + path, headers=sign("GET", path), timeout=10)
     return r.text
 
 @mcp.tool()
 def get_options_chain(symbol: str, expiration: str = "") -> str:
     """Get options chain for a symbol. expiration format: YYYY-MM-DD"""
-    url = f"{BASE_URL}/openapi/quote/v1/option/chain?symbol={symbol}"
+    path = f"/openapi/quote/v1/option/chain?symbol={symbol}"
     if expiration:
-        url += f"&expireDate={expiration}"
-    r = httpx.get(url, headers=get_headers(), timeout=10)
+        path += f"&expireDate={expiration}"
+    r = httpx.get(BASE_URL + path, headers=sign("GET", path), timeout=10)
     return r.text
 
 @mcp.tool()
 def get_orders() -> str:
     """Get list of open and recent orders."""
-    r = httpx.get(f"{BASE_URL}/openapi/trade/v2/{ACCOUNT_ID}/orders?status=Working", headers=get_headers(), timeout=10)
+    path = f"/openapi/trade/v2/{ACCOUNT_ID}/orders?status=Working"
+    r = httpx.get(BASE_URL + path, headers=sign("GET", path), timeout=10)
     return r.text
 
 @mcp.tool()
 def place_order(symbol: str, action: str, quantity: int, order_type: str = "MKT", limit_price: float = 0.0) -> str:
     """Place a stock order. action=BUY or SELL, order_type=MKT or LMT."""
+    path = f"/openapi/trade/v2/{ACCOUNT_ID}/orders"
     body = {"symbol": symbol, "action": action, "orderType": order_type, "quantity": quantity}
     if order_type == "LMT":
         body["limitPrice"] = limit_price
     body_str = json.dumps(body)
-    r = httpx.post(f"{BASE_URL}/openapi/trade/v2/{ACCOUNT_ID}/orders", headers=get_headers(), content=body_str.encode(), timeout=10)
+    r = httpx.post(BASE_URL + path, headers=sign("POST", path, body_str), content=body_str.encode(), timeout=10)
     return r.text
 
 @mcp.tool()
 def cancel_order(order_id: str) -> str:
     """Cancel an open order by order ID."""
-    r = httpx.post(f"{BASE_URL}/openapi/trade/v2/{ACCOUNT_ID}/orders/{order_id}/cancel", headers=get_headers(), timeout=10)
+    path = f"/openapi/trade/v2/{ACCOUNT_ID}/orders/{order_id}/cancel"
+    r = httpx.post(BASE_URL + path, headers=sign("POST", path), timeout=10)
     return r.text
 
 # OAuth handlers
@@ -137,16 +147,14 @@ oauth_routes = [
 ]
 
 oauth_app = Starlette(routes=oauth_routes)
-mcp_app = mcp.streamable_http_app()
 
-async def combined_app(scope, receive, send):
-    path = scope.get("path", "")
-    if path.startswith("/mcp"):
-        await mcp_app(scope, receive, send)
-    else:
-        await oauth_app(scope, receive, send)
+# Use FastMCP's built-in HTTP app with proper lifespan
+app = mcp.http_app(path="/mcp")
+
+# Mount OAuth routes onto the MCP app
+for route in oauth_routes:
+    app.router.routes.insert(0, route)
 
 if __name__ == "__main__":
-    import uvicorn
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(combined_app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port)

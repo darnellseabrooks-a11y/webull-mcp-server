@@ -10,7 +10,7 @@ from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, HTMLResponse
-from starlette.routing import Route
+from starlette.routing import Route, Mount
 import uvicorn
 
 APP_KEY    = os.environ.get("WEBULL_APP_KEY", "")
@@ -20,7 +20,8 @@ ACCOUNT_ID = os.environ.get("WEBULL_ACCOUNT_ID", "")
 BASE_URL   = os.environ.get("WEBULL_BASE_URL", "https://prod-openapi-alb.webullbroker.com")
 SERVER_URL = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "localhost:8000")
 
-mcp = FastMCP("Webull Trading Assistant")
+# stateless_http=True fixes the task group initialization issue
+mcp = FastMCP("Webull Trading Assistant", stateless_http=True)
 
 def sign(method, path, body_str=""):
     ts    = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -95,6 +96,7 @@ def cancel_order(order_id: str) -> str:
     r = httpx.post(BASE_URL + path, headers=sign("POST", path), timeout=10)
     return r.text
 
+# OAuth handlers
 async def oauth_metadata(request: Request):
     base = f"https://{SERVER_URL}"
     return JSONResponse({
@@ -136,24 +138,22 @@ async def oauth_token(request: Request):
 async def homepage(request: Request):
     return HTMLResponse("<h2>Webull MCP Server is running.</h2>")
 
-oauth_routes = [
-    Route("/", homepage),
-    Route("/.well-known/oauth-authorization-server", oauth_metadata),
-    Route("/oauth/register", oauth_register, methods=["POST"]),
-    Route("/oauth/authorize", oauth_authorize),
-    Route("/oauth/token", oauth_token, methods=["POST", "GET"]),
-]
+# Build MCP app with proper lifespan
+mcp_app = mcp.streamable_http_app()
 
-oauth_app = Starlette(routes=oauth_routes)
-
-async def combined_app(scope, receive, send):
-    path = scope.get("path", "")
-    if path.startswith("/mcp"):
-        mcp_app = mcp.streamable_http_app()
-        await mcp_app(scope, receive, send)
-    else:
-        await oauth_app(scope, receive, send)
+# Build combined app passing MCP lifespan context
+app = Starlette(
+    routes=[
+        Route("/", homepage),
+        Route("/.well-known/oauth-authorization-server", oauth_metadata),
+        Route("/oauth/register", oauth_register, methods=["POST"]),
+        Route("/oauth/authorize", oauth_authorize),
+        Route("/oauth/token", oauth_token, methods=["POST", "GET"]),
+        Mount("/mcp", app=mcp_app),
+    ],
+    lifespan=mcp_app.router.lifespan_context,
+)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(combined_app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port)

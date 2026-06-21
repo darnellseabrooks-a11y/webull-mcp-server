@@ -96,7 +96,7 @@ def cancel_order(order_id: str) -> str:
 # Build MCP app
 mcp_app = mcp.streamable_http_app()
 
-# FastAPI app with redirect_slashes=False to prevent 307 redirects
+# FastAPI app
 app = FastAPI(
     lifespan=mcp_app.router.lifespan_context,
     redirect_slashes=False
@@ -157,8 +157,14 @@ async def oauth_token():
         "refresh_token": "webull-refresh-" + str(uuid.uuid4()),
     })
 
-# Mount MCP app - redirect_slashes=False prevents 307
-app.mount("/mcp", mcp_app)
+# Direct MCP handler - passes requests to MCP app with root path
+@app.api_route("/mcp", methods=["GET", "POST", "DELETE", "PUT"])
+@app.api_route("/mcp/{path:path}", methods=["GET", "POST", "DELETE", "PUT"])
+async def mcp_handler(request: Request, path: str = ""):
+    scope = dict(request.scope)
+    scope["path"] = "/" + path if path else "/"
+    scope["root_path"] = ""
+    await mcp_app(scope, request._receive, request._send)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))

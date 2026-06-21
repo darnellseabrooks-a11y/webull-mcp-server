@@ -7,10 +7,8 @@ import hashlib
 import base64
 from datetime import datetime, timezone
 from mcp.server.fastmcp import FastMCP
-from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.responses import JSONResponse, RedirectResponse, HTMLResponse
-from starlette.routing import Route, Mount
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse
 import uvicorn
 
 APP_KEY    = os.environ.get("WEBULL_APP_KEY", "")
@@ -20,7 +18,6 @@ ACCOUNT_ID = os.environ.get("WEBULL_ACCOUNT_ID", "")
 BASE_URL   = os.environ.get("WEBULL_BASE_URL", "https://prod-openapi-alb.webullbroker.com")
 SERVER_URL = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "localhost:8000")
 
-# stateless_http=True fixes the task group initialization issue
 mcp = FastMCP("Webull Trading Assistant", stateless_http=True)
 
 def sign(method, path, body_str=""):
@@ -96,8 +93,18 @@ def cancel_order(order_id: str) -> str:
     r = httpx.post(BASE_URL + path, headers=sign("POST", path), timeout=10)
     return r.text
 
-# OAuth handlers
-async def oauth_metadata(request: Request):
+# Get the MCP ASGI app
+mcp_app = mcp.streamable_http_app()
+
+# Create FastAPI app with MCP lifespan
+app = FastAPI(lifespan=mcp_app.router.lifespan_context)
+
+@app.get("/")
+async def homepage():
+    return HTMLResponse("<h2>Webull MCP Server is running.</h2>")
+
+@app.get("/.well-known/oauth-authorization-server")
+async def oauth_metadata():
     base = f"https://{SERVER_URL}"
     return JSONResponse({
         "issuer": base,
@@ -109,6 +116,7 @@ async def oauth_metadata(request: Request):
         "code_challenge_methods_supported": ["S256"],
     })
 
+@app.post("/oauth/register")
 async def oauth_register(request: Request):
     body = await request.json()
     client_id = "webull-" + str(uuid.uuid4())[:8]
@@ -120,13 +128,15 @@ async def oauth_register(request: Request):
         "response_types": ["code"],
     })
 
+@app.get("/oauth/authorize")
 async def oauth_authorize(request: Request):
     redirect_uri = request.query_params.get("redirect_uri", "")
     state = request.query_params.get("state", "")
     code = "webull-code-" + str(uuid.uuid4())
     return RedirectResponse(url=f"{redirect_uri}?code={code}&state={state}")
 
-async def oauth_token(request: Request):
+@app.api_route("/oauth/token", methods=["GET", "POST"])
+async def oauth_token():
     return JSONResponse({
         "access_token":  "webull-token-" + str(uuid.uuid4()),
         "token_type":    "bearer",
@@ -135,28 +145,8 @@ async def oauth_token(request: Request):
         "refresh_token": "webull-refresh-" + str(uuid.uuid4()),
     })
 
-async def homepage(request: Request):
-    return HTMLResponse("<h2>Webull MCP Server is running.</h2>")
-
-# Build MCP app with proper lifespan
-mcp_app = mcp.streamable_http_app()
-
-# Build combined app passing MCP lifespan context
-async def handle_mcp(scope, receive, send):
-    await mcp_app(scope, receive, send)
-
-app = Starlette(
-    routes=[
-        Route("/", homepage),
-        Route("/.well-known/oauth-authorization-server", oauth_metadata),
-        Route("/oauth/register", oauth_register, methods=["POST"]),
-        Route("/oauth/authorize", oauth_authorize),
-        Route("/oauth/token", oauth_token, methods=["POST", "GET"]),
-        Route("/mcp", handle_mcp, methods=["GET", "POST", "DELETE"]),
-        Route("/mcp/", handle_mcp, methods=["GET", "POST", "DELETE"]),
-    ],
-    lifespan=mcp_app.router.lifespan_context,
-)
+# Mount MCP app - FastAPI handles this without redirect issues
+app.mount("/mcp", mcp_app)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))

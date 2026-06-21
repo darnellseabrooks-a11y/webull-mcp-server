@@ -103,6 +103,15 @@ app = FastAPI(lifespan=mcp_app.router.lifespan_context)
 async def homepage():
     return HTMLResponse("<h2>Webull MCP Server is running.</h2>")
 
+@app.get("/.well-known/oauth-protected-resource")
+@app.get("/.well-known/oauth-protected-resource/mcp")
+async def oauth_protected_resource():
+    base = f"https://{SERVER_URL}"
+    return JSONResponse({
+        "resource": f"{base}/mcp",
+        "authorization_servers": [base],
+    })
+
 @app.get("/.well-known/oauth-authorization-server")
 async def oauth_metadata():
     base = f"https://{SERVER_URL}"

@@ -142,6 +142,9 @@ async def homepage(request: Request):
 mcp_app = mcp.streamable_http_app()
 
 # Build combined app passing MCP lifespan context
+async def handle_mcp(scope, receive, send):
+    await mcp_app(scope, receive, send)
+
 app = Starlette(
     routes=[
         Route("/", homepage),
@@ -149,8 +152,8 @@ app = Starlette(
         Route("/oauth/register", oauth_register, methods=["POST"]),
         Route("/oauth/authorize", oauth_authorize),
         Route("/oauth/token", oauth_token, methods=["POST", "GET"]),
-        Mount("/mcp", app=mcp_app),
-        Mount("/mcp/", app=mcp_app),
+        Route("/mcp", handle_mcp, methods=["GET", "POST", "DELETE"]),
+        Route("/mcp/", handle_mcp, methods=["GET", "POST", "DELETE"]),
     ],
     lifespan=mcp_app.router.lifespan_context,
 )

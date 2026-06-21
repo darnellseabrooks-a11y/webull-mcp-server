@@ -93,11 +93,14 @@ def cancel_order(order_id: str) -> str:
     r = httpx.post(BASE_URL + path, headers=sign("POST", path), timeout=10)
     return r.text
 
-# Get the MCP ASGI app
+# Build MCP app
 mcp_app = mcp.streamable_http_app()
 
-# Create FastAPI app with MCP lifespan
-app = FastAPI(lifespan=mcp_app.router.lifespan_context)
+# FastAPI app with redirect_slashes=False to prevent 307 redirects
+app = FastAPI(
+    lifespan=mcp_app.router.lifespan_context,
+    redirect_slashes=False
+)
 
 @app.get("/")
 async def homepage():
@@ -154,7 +157,7 @@ async def oauth_token():
         "refresh_token": "webull-refresh-" + str(uuid.uuid4()),
     })
 
-# Mount MCP app - FastAPI handles this without redirect issues
+# Mount MCP app - redirect_slashes=False prevents 307
 app.mount("/mcp", mcp_app)
 
 if __name__ == "__main__":

@@ -7,6 +7,8 @@ import hashlib
 import base64
 from datetime import datetime, timezone
 from mcp.server.fastmcp import FastMCP
+from mcp.server import Server
+from mcp.server.streamable_http import streamable_http_asgi
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse
 import uvicorn
@@ -157,12 +159,13 @@ async def oauth_token():
         "refresh_token": "webull-refresh-" + str(uuid.uuid4()),
     })
 
-# Direct MCP handler - passes requests to MCP app with root path
+# Pass MCP requests through with corrected path
 @app.api_route("/mcp", methods=["GET", "POST", "DELETE", "PUT"])
 @app.api_route("/mcp/{path:path}", methods=["GET", "POST", "DELETE", "PUT"])
 async def mcp_handler(request: Request, path: str = ""):
     scope = dict(request.scope)
-    scope["path"] = "/" + path if path else "/"
+    scope["path"] = "/" if not path else f"/{path}"
+    scope["raw_path"] = scope["path"].encode()
     scope["root_path"] = ""
     await mcp_app(scope, request._receive, request._send)
 

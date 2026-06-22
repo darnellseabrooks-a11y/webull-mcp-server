@@ -8,7 +8,6 @@ import base64
 from datetime import datetime, timezone
 from mcp.server.fastmcp import FastMCP
 from mcp.server import Server
-from mcp.server.streamable_http import streamable_http_asgi
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse
 import uvicorn

@@ -7,9 +7,11 @@ import hashlib
 import base64
 from datetime import datetime, timezone
 from mcp.server.fastmcp import FastMCP
-from mcp.server import Server
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse, RedirectResponse, HTMLResponse
+from starlette.routing import Route
+from starlette.middleware.base import BaseHTTPMiddleware
 import uvicorn
 
 APP_KEY    = os.environ.get("WEBULL_APP_KEY", "")
@@ -94,30 +96,21 @@ def cancel_order(order_id: str) -> str:
     r = httpx.post(BASE_URL + path, headers=sign("POST", path), timeout=10)
     return r.text
 
-# Build MCP app
-mcp_app = mcp.streamable_http_app()
+# Build MCP ASGI app
+mcp_asgi = mcp.streamable_http_app()
 
-# FastAPI app
-app = FastAPI(
-    lifespan=mcp_app.router.lifespan_context,
-    redirect_slashes=False
-)
-
-@app.get("/")
-async def homepage():
+# OAuth route handlers
+async def homepage(request: Request):
     return HTMLResponse("<h2>Webull MCP Server is running.</h2>")
 
-@app.get("/.well-known/oauth-protected-resource")
-@app.get("/.well-known/oauth-protected-resource/mcp")
-async def oauth_protected_resource():
+async def oauth_protected_resource(request: Request):
     base = f"https://{SERVER_URL}"
     return JSONResponse({
         "resource": f"{base}/mcp",
         "authorization_servers": [base],
     })
 
-@app.get("/.well-known/oauth-authorization-server")
-async def oauth_metadata():
+async def oauth_metadata(request: Request):
     base = f"https://{SERVER_URL}"
     return JSONResponse({
         "issuer": base,
@@ -129,7 +122,6 @@ async def oauth_metadata():
         "code_challenge_methods_supported": ["S256"],
     })
 
-@app.post("/oauth/register")
 async def oauth_register(request: Request):
     body = await request.json()
     client_id = "webull-" + str(uuid.uuid4())[:8]
@@ -141,15 +133,13 @@ async def oauth_register(request: Request):
         "response_types": ["code"],
     })
 
-@app.get("/oauth/authorize")
 async def oauth_authorize(request: Request):
     redirect_uri = request.query_params.get("redirect_uri", "")
     state = request.query_params.get("state", "")
     code = "webull-code-" + str(uuid.uuid4())
     return RedirectResponse(url=f"{redirect_uri}?code={code}&state={state}")
 
-@app.api_route("/oauth/token", methods=["GET", "POST"])
-async def oauth_token():
+async def oauth_token(request: Request):
     return JSONResponse({
         "access_token":  "webull-token-" + str(uuid.uuid4()),
         "token_type":    "bearer",
@@ -158,15 +148,33 @@ async def oauth_token():
         "refresh_token": "webull-refresh-" + str(uuid.uuid4()),
     })
 
-# Pass MCP requests through with corrected path
-@app.api_route("/mcp", methods=["GET", "POST", "DELETE", "PUT"])
-@app.api_route("/mcp/{path:path}", methods=["GET", "POST", "DELETE", "PUT"])
-async def mcp_handler(request: Request, path: str = ""):
-    scope = dict(request.scope)
-    scope["path"] = "/" if not path else f"/{path}"
-    scope["raw_path"] = scope["path"].encode()
-    scope["root_path"] = ""
-    await mcp_app(scope, request._receive, request._send)
+# Top-level ASGI app that routes between OAuth and MCP
+async def app(scope, receive, send):
+    if scope["type"] == "lifespan":
+        await mcp_asgi(scope, receive, send)
+        return
+
+    path = scope.get("path", "")
+
+    if path.startswith("/mcp"):
+        # Strip /mcp prefix and forward to MCP app
+        new_path = path[4:] or "/"
+        scope = dict(scope)
+        scope["path"] = new_path
+        scope["raw_path"] = new_path.encode("utf-8")
+        await mcp_asgi(scope, receive, send)
+    else:
+        # Handle OAuth routes with Starlette
+        oauth_app = Starlette(routes=[
+            Route("/", homepage),
+            Route("/.well-known/oauth-protected-resource", oauth_protected_resource),
+            Route("/.well-known/oauth-protected-resource/mcp", oauth_protected_resource),
+            Route("/.well-known/oauth-authorization-server", oauth_metadata),
+            Route("/oauth/register", oauth_register, methods=["POST"]),
+            Route("/oauth/authorize", oauth_authorize),
+            Route("/oauth/token", oauth_token, methods=["GET", "POST"]),
+        ])
+        await oauth_app(scope, receive, send)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))

@@ -11,7 +11,6 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, HTMLResponse
 from starlette.routing import Route
-from starlette.middleware.base import BaseHTTPMiddleware
 import uvicorn
 
 APP_KEY    = os.environ.get("WEBULL_APP_KEY", "")
@@ -21,7 +20,11 @@ ACCOUNT_ID = os.environ.get("WEBULL_ACCOUNT_ID", "")
 BASE_URL   = os.environ.get("WEBULL_BASE_URL", "https://prod-openapi-alb.webullbroker.com")
 SERVER_URL = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "localhost:8000")
 
-mcp = FastMCP("Webull Trading Assistant", stateless_http=True)
+# ── FastMCP mounted at "/" so Claude.ai's POST / hits it directly ──────────
+mcp = FastMCP(
+    "Webull Trading Assistant",
+    stateless_http=True,
+)
 
 def sign(method, path, body_str=""):
     ts    = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -41,6 +44,7 @@ def sign(method, path, body_str=""):
         "x-timestamp":           ts,
     }
 
+# ── MCP Tools ─────────────────────────────────────────────────────────────
 @mcp.tool()
 def get_account_info() -> str:
     """Get Webull account balance and buying power."""
@@ -96,47 +100,56 @@ def cancel_order(order_id: str) -> str:
     r = httpx.post(BASE_URL + path, headers=sign("POST", path), timeout=10)
     return r.text
 
-# Build MCP ASGI app
+# ── Build MCP ASGI app ─────────────────────────────────────────────────────
+# streamable_http_path="/" means FastMCP listens on POST /
+# OAuth routes (/.well-known/*, /oauth/*, /) are shorter and matched FIRST
+# by Starlette before falling through to FastMCP's catch-all.
 mcp_asgi = mcp.streamable_http_app()
 
-# OAuth route handlers
+# ── OAuth / discovery route handlers ──────────────────────────────────────
 async def homepage(request: Request):
-    return HTMLResponse("<h2>Webull MCP Server is running.</h2>")
+    return HTMLResponse("<h2>Webull MCP Server — running ✅</h2>")
 
 async def oauth_protected_resource(request: Request):
+    # resource_server_url = root (no /mcp suffix).
+    # Claude.ai will POST to this URL directly after OAuth.
     base = f"https://{SERVER_URL}"
     return JSONResponse({
-        "resource": f"{base}/mcp",
-        "authorization_servers": [base],
+        "resource":               base,          # ← root, NOT /mcp
+        "authorization_servers":  [base],
+        "scopes_supported":       ["read", "write"],
+        "bearer_methods_supported": ["header"],
     })
 
 async def oauth_metadata(request: Request):
     base = f"https://{SERVER_URL}"
     return JSONResponse({
-        "issuer": base,
-        "authorization_endpoint": f"{base}/oauth/authorize",
-        "token_endpoint": f"{base}/oauth/token",
-        "registration_endpoint": f"{base}/oauth/register",
-        "response_types_supported": ["code"],
-        "grant_types_supported": ["authorization_code"],
-        "code_challenge_methods_supported": ["S256"],
+        "issuer":                              base,
+        "authorization_endpoint":             f"{base}/oauth/authorize",
+        "token_endpoint":                     f"{base}/oauth/token",
+        "registration_endpoint":              f"{base}/oauth/register",
+        "response_types_supported":           ["code"],
+        "grant_types_supported":              ["authorization_code", "refresh_token"],
+        "code_challenge_methods_supported":   ["S256"],
+        "token_endpoint_auth_methods_supported": ["none"],
     })
 
 async def oauth_register(request: Request):
     body = await request.json()
     client_id = "webull-" + str(uuid.uuid4())[:8]
     return JSONResponse({
-        "client_id": client_id,
-        "client_secret": "webull-secret",
-        "redirect_uris": body.get("redirect_uris", []),
-        "grant_types": ["authorization_code"],
+        "client_id":    client_id,
+        # public client — no client_secret
+        "redirect_uris":  body.get("redirect_uris", []),
+        "grant_types":    ["authorization_code", "refresh_token"],
         "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
     })
 
 async def oauth_authorize(request: Request):
     redirect_uri = request.query_params.get("redirect_uri", "")
-    state = request.query_params.get("state", "")
-    code = "webull-code-" + str(uuid.uuid4())
+    state        = request.query_params.get("state", "")
+    code         = "webull-code-" + str(uuid.uuid4())
     return RedirectResponse(url=f"{redirect_uri}?code={code}&state={state}")
 
 async def oauth_token(request: Request):
@@ -148,33 +161,42 @@ async def oauth_token(request: Request):
         "refresh_token": "webull-refresh-" + str(uuid.uuid4()),
     })
 
-# Top-level ASGI app that routes between OAuth and MCP
+# ── Top-level ASGI router ─────────────────────────────────────────────────
+# Priority: OAuth / discovery routes → FastMCP catch-all (POST / GET / DELETE /)
+_oauth_routes = Starlette(routes=[
+    Route("/",                                        homepage),
+    Route("/.well-known/oauth-protected-resource",    oauth_protected_resource),
+    # Claude also fetches the sub-path variant
+    Route("/.well-known/oauth-protected-resource/{path:path}", oauth_protected_resource),
+    Route("/.well-known/oauth-authorization-server",  oauth_metadata),
+    Route("/oauth/register",  oauth_register,  methods=["POST"]),
+    Route("/oauth/authorize", oauth_authorize, methods=["GET"]),
+    Route("/oauth/token",     oauth_token,     methods=["GET", "POST"]),
+])
+
+# Paths handled by OAuth/Starlette — everything else goes to FastMCP
+_OAUTH_PREFIXES = (
+    "/.well-known/",
+    "/oauth/",
+)
+_OAUTH_EXACT = {"/"}
+
 async def app(scope, receive, send):
+    # Lifespan events must go to FastMCP (it owns the lifespan)
     if scope["type"] == "lifespan":
         await mcp_asgi(scope, receive, send)
         return
 
-    path = scope.get("path", "")
+    path = scope.get("path", "/")
 
-    if path.startswith("/mcp"):
-        # Strip /mcp prefix and forward to MCP app
-        new_path = path[4:] or "/"
-        scope = dict(scope)
-        scope["path"] = new_path
-        scope["raw_path"] = new_path.encode("utf-8")
-        await mcp_asgi(scope, receive, send)
-    else:
-        # Handle OAuth routes with Starlette
-        oauth_app = Starlette(routes=[
-            Route("/", homepage),
-            Route("/.well-known/oauth-protected-resource", oauth_protected_resource),
-            Route("/.well-known/oauth-protected-resource/mcp", oauth_protected_resource),
-            Route("/.well-known/oauth-authorization-server", oauth_metadata),
-            Route("/oauth/register", oauth_register, methods=["POST"]),
-            Route("/oauth/authorize", oauth_authorize),
-            Route("/oauth/token", oauth_token, methods=["GET", "POST"]),
-        ])
-        await oauth_app(scope, receive, send)
+    # Route OAuth/discovery requests to Starlette
+    if path in _OAUTH_EXACT or any(path.startswith(p) for p in _OAUTH_PREFIXES):
+        await _oauth_routes(scope, receive, send)
+        return
+
+    # Everything else (POST /, GET /, DELETE /) → FastMCP
+    await mcp_asgi(scope, receive, send)
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))

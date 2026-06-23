@@ -164,7 +164,8 @@ async def oauth_token(request: Request):
 # ── Top-level ASGI router ─────────────────────────────────────────────────
 # Priority: OAuth / discovery routes → FastMCP catch-all (POST / GET / DELETE /)
 _oauth_routes = Starlette(routes=[
-    Route("/",                                        homepage),
+    R_oauth_routes = Starlette(routes=[
+    Route("/", homepage, methods=["GET"]),
     Route("/.well-known/oauth-protected-resource",    oauth_protected_resource),
     # Claude also fetches the sub-path variant
     Route("/.well-known/oauth-protected-resource/{path:path}", oauth_protected_resource),

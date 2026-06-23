@@ -196,3 +196,13 @@ async def app(scope, receive, send):
 
     # Everything else (POST /, GET /, DELETE /) → FastMCP
     await mcp_asgi(scope, receive, send)
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(
+        "server:app",
+        host="0.0.0.0",
+        port=port,
+        forwarded_allow_ips="*",
+        proxy_headers=True,
+    )

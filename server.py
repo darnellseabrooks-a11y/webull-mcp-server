@@ -179,7 +179,7 @@ _OAUTH_PREFIXES = (
     "/.well-known/",
     "/oauth/",
 )
-_OAUTH_EXACT = {"/"}
+_OAUTH_EXACT = set()  # POST / must reach FastMCP, not Starlette
 
 async def app(scope, receive, send):
     # Lifespan events must go to FastMCP (it owns the lifespan)

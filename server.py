@@ -7,6 +7,7 @@ import hashlib
 import base64
 from datetime import datetime, timezone
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, HTMLResponse
@@ -39,8 +40,14 @@ def sign(method: str, path: str, body_str: str = "") -> dict:
         "x-timestamp":           ts,
     }
 
-# ── FastMCP ────────────────────────────────────────────────────────────────
-mcp = FastMCP("Webull Trading Assistant", stateless_http=True)
+# ── FastMCP — DNS rebinding protection disabled for Railway proxy ──────────
+mcp = FastMCP(
+    "Webull Trading Assistant",
+    stateless_http=True,
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=False,
+    ),
+)
 
 @mcp.tool()
 def get_account_info() -> str:
@@ -107,10 +114,10 @@ def cancel_order(order_id: str) -> str:
     r = httpx.post(BASE_URL + path, headers=sign("POST", path), timeout=10)
     return r.text
 
-# FastMCP mounts at /mcp internally
+# FastMCP mounts internally at /mcp
 mcp_asgi = mcp.streamable_http_app()
 
-# ── Discovery / token route handlers ──────────────────────────────────────
+# ── Discovery / auth route handlers ───────────────────────────────────────
 async def homepage(request: Request):
     return HTMLResponse("<h2>Webull MCP Server — running ✅</h2>")
 
@@ -133,14 +140,13 @@ async def oauth_metadata(request: Request):
         "token_endpoint_auth_methods_supported": ["none"],
     })
 
-# Claude.ai also checks /.well-known/openid-configuration
 async def openid_config(request: Request):
     base = f"https://{SERVER_URL}"
     return JSONResponse({
-        "issuer":               base,
-        "token_endpoint":       f"{base}/token",
-        "registration_endpoint": f"{base}/register",
-        "grant_types_supported": ["client_credentials"],
+        "issuer":                                base,
+        "token_endpoint":                        f"{base}/token",
+        "registration_endpoint":                 f"{base}/register",
+        "grant_types_supported":                 ["client_credentials"],
         "token_endpoint_auth_methods_supported": ["none"],
     })
 
@@ -158,15 +164,15 @@ async def token(request: Request):
         "expires_in":   315360000,
     })
 
-# ── Starlette app for non-MCP routes ──────────────────────────────────────
+# ── Starlette for non-MCP routes ───────────────────────────────────────────
 _meta_app = Starlette(routes=[
-    Route("/",                                       homepage,              methods=["GET"]),
+    Route("/",                                       homepage,             methods=["GET"]),
     Route("/.well-known/oauth-protected-resource",   oauth_protected_resource),
     Route("/.well-known/oauth-protected-resource/{path:path}", oauth_protected_resource),
     Route("/.well-known/oauth-authorization-server", oauth_metadata),
     Route("/.well-known/openid-configuration",       openid_config),
-    Route("/register",                               register,              methods=["POST"]),
-    Route("/token",                                  token,                 methods=["POST"]),
+    Route("/register",                               register,             methods=["POST"]),
+    Route("/token",                                  token,                methods=["POST"]),
 ])
 
 _META_PREFIXES = ("/.well-known/", "/register", "/token")
@@ -190,7 +196,7 @@ async def app(scope, receive, send):
         await _meta_app(scope, receive, send)
         return
 
-    # All MCP traffic → rewrite path to /mcp and forward to FastMCP
+    # All MCP traffic → rewrite to /mcp where FastMCP listens
     scope = dict(scope)
     scope["path"]     = "/mcp"
     scope["raw_path"] = b"/mcp"

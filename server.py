@@ -19,8 +19,6 @@ APP_SECRET = os.environ.get("WEBULL_APP_SECRET", "")
 ACCOUNT_ID = os.environ.get("WEBULL_ACCOUNT_ID", "")
 BASE_URL   = os.environ.get("WEBULL_BASE_URL", "https://prod-openapi-alb.webullbroker.com")
 SERVER_URL = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "localhost:8000")
-
-# Static bearer token — set this in Railway env vars as MCP_SECRET
 MCP_SECRET = os.environ.get("MCP_SECRET", "")
 
 # ── Signing helper ─────────────────────────────────────────────────────────
@@ -41,14 +39,7 @@ def sign(method: str, path: str, body_str: str = "") -> dict:
         "x-timestamp":           ts,
     }
 
-# ── Auth check ─────────────────────────────────────────────────────────────
-def authorized(request: Request) -> bool:
-    if not MCP_SECRET:
-        return True  # no secret set = open (not recommended for prod)
-    auth = request.headers.get("authorization", "")
-    return auth == f"Bearer {MCP_SECRET}"
-
-# ── FastMCP tools ──────────────────────────────────────────────────────────
+# ── FastMCP ────────────────────────────────────────────────────────────────
 mcp = FastMCP("Webull Trading Assistant", stateless_http=True)
 
 @mcp.tool()
@@ -116,9 +107,10 @@ def cancel_order(order_id: str) -> str:
     r = httpx.post(BASE_URL + path, headers=sign("POST", path), timeout=10)
     return r.text
 
+# FastMCP mounts at /mcp internally
 mcp_asgi = mcp.streamable_http_app()
 
-# ── Minimal discovery endpoints (no OAuth flow) ────────────────────────────
+# ── Discovery / token route handlers ──────────────────────────────────────
 async def homepage(request: Request):
     return HTMLResponse("<h2>Webull MCP Server — running ✅</h2>")
 
@@ -141,8 +133,18 @@ async def oauth_metadata(request: Request):
         "token_endpoint_auth_methods_supported": ["none"],
     })
 
+# Claude.ai also checks /.well-known/openid-configuration
+async def openid_config(request: Request):
+    base = f"https://{SERVER_URL}"
+    return JSONResponse({
+        "issuer":               base,
+        "token_endpoint":       f"{base}/token",
+        "registration_endpoint": f"{base}/register",
+        "grant_types_supported": ["client_credentials"],
+        "token_endpoint_auth_methods_supported": ["none"],
+    })
+
 async def register(request: Request):
-    """Dynamic client registration — always succeeds, returns static client."""
     return JSONResponse({
         "client_id":                  "webull-mcp-client",
         "grant_types":                ["client_credentials"],
@@ -150,24 +152,24 @@ async def register(request: Request):
     })
 
 async def token(request: Request):
-    """Token endpoint — returns the static MCP_SECRET as the bearer token."""
     return JSONResponse({
         "access_token": MCP_SECRET,
         "token_type":   "bearer",
-        "expires_in":   315360000,  # 10 years
+        "expires_in":   315360000,
     })
 
-# ── Starlette app for discovery routes ────────────────────────────────────
-_oauth_app = Starlette(routes=[
-    Route("/",                                     homepage,                methods=["GET"]),
-    Route("/.well-known/oauth-protected-resource", oauth_protected_resource),
+# ── Starlette app for non-MCP routes ──────────────────────────────────────
+_meta_app = Starlette(routes=[
+    Route("/",                                       homepage,              methods=["GET"]),
+    Route("/.well-known/oauth-protected-resource",   oauth_protected_resource),
     Route("/.well-known/oauth-protected-resource/{path:path}", oauth_protected_resource),
     Route("/.well-known/oauth-authorization-server", oauth_metadata),
-    Route("/register",                             register,                methods=["POST"]),
-    Route("/token",                                token,                   methods=["POST"]),
+    Route("/.well-known/openid-configuration",       openid_config),
+    Route("/register",                               register,              methods=["POST"]),
+    Route("/token",                                  token,                 methods=["POST"]),
 ])
 
-_OAUTH_PREFIXES = ("/.well-known/", "/register", "/token")
+_META_PREFIXES = ("/.well-known/", "/register", "/token")
 
 # ── Top-level ASGI router ──────────────────────────────────────────────────
 async def app(scope, receive, send):
@@ -176,20 +178,24 @@ async def app(scope, receive, send):
         return
 
     path   = scope.get("path", "/")
-    method = scope.get("method", "POST") if scope["type"] == "http" else ""
+    method = scope.get("method", "") if scope["type"] == "http" else ""
 
     # GET / → homepage
     if path == "/" and method == "GET":
-        await _oauth_app(scope, receive, send)
+        await _meta_app(scope, receive, send)
         return
 
-    # Discovery routes → Starlette
-    if any(path.startswith(p) for p in _OAUTH_PREFIXES):
-        await _oauth_app(scope, receive, send)
+    # Discovery / token routes → Starlette
+    if any(path.startswith(p) for p in _META_PREFIXES):
+        await _meta_app(scope, receive, send)
         return
 
-    # Everything else → FastMCP
+    # All MCP traffic → rewrite path to /mcp and forward to FastMCP
+    scope = dict(scope)
+    scope["path"]     = "/mcp"
+    scope["raw_path"] = b"/mcp"
     await mcp_asgi(scope, receive, send)
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))

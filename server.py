@@ -9,20 +9,22 @@ from datetime import datetime, timezone
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse, RedirectResponse, HTMLResponse
+from starlette.responses import JSONResponse, HTMLResponse
 from starlette.routing import Route
 import uvicorn
 
+# ── Env vars ───────────────────────────────────────────────────────────────
 APP_KEY    = os.environ.get("WEBULL_APP_KEY", "")
 APP_SECRET = os.environ.get("WEBULL_APP_SECRET", "")
-TOKEN      = os.environ.get("WEBULL_TOKEN", "")
 ACCOUNT_ID = os.environ.get("WEBULL_ACCOUNT_ID", "")
 BASE_URL   = os.environ.get("WEBULL_BASE_URL", "https://prod-openapi-alb.webullbroker.com")
 SERVER_URL = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "localhost:8000")
 
-mcp = FastMCP("Webull Trading Assistant", stateless_http=True)
+# Static bearer token — set this in Railway env vars as MCP_SECRET
+MCP_SECRET = os.environ.get("MCP_SECRET", "")
 
-def sign(method, path, body_str=""):
+# ── Signing helper ─────────────────────────────────────────────────────────
+def sign(method: str, path: str, body_str: str = "") -> dict:
     ts    = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     nonce = str(uuid.uuid4()).replace("-", "")
     src   = "\n".join([method, path, ts, nonce, body_str])
@@ -32,13 +34,22 @@ def sign(method, path, body_str=""):
     return {
         "Content-Type":          "application/json",
         "x-app-key":             APP_KEY,
-        "x-auth-token":          TOKEN,
         "x-signature":           sig,
         "x-signature-algorithm": "HmacSHA1",
         "x-signature-version":   "1",
         "x-signature-nonce":     nonce,
         "x-timestamp":           ts,
     }
+
+# ── Auth check ─────────────────────────────────────────────────────────────
+def authorized(request: Request) -> bool:
+    if not MCP_SECRET:
+        return True  # no secret set = open (not recommended for prod)
+    auth = request.headers.get("authorization", "")
+    return auth == f"Bearer {MCP_SECRET}"
+
+# ── FastMCP tools ──────────────────────────────────────────────────────────
+mcp = FastMCP("Webull Trading Assistant", stateless_http=True)
 
 @mcp.tool()
 def get_account_info() -> str:
@@ -81,11 +92,21 @@ def get_orders() -> str:
 def place_order(symbol: str, action: str, quantity: int, order_type: str = "MKT", limit_price: float = 0.0) -> str:
     """Place a stock order. action=BUY or SELL, order_type=MKT or LMT."""
     path = f"/openapi/trade/v2/{ACCOUNT_ID}/orders"
-    body = {"symbol": symbol, "action": action, "orderType": order_type, "quantity": quantity}
+    body = {
+        "symbol":    symbol,
+        "action":    action,
+        "orderType": order_type,
+        "quantity":  quantity,
+    }
     if order_type == "LMT":
         body["limitPrice"] = limit_price
     body_str = json.dumps(body)
-    r = httpx.post(BASE_URL + path, headers=sign("POST", path, body_str), content=body_str.encode(), timeout=10)
+    r = httpx.post(
+        BASE_URL + path,
+        headers=sign("POST", path, body_str),
+        content=body_str.encode(),
+        timeout=10,
+    )
     return r.text
 
 @mcp.tool()
@@ -97,6 +118,7 @@ def cancel_order(order_id: str) -> str:
 
 mcp_asgi = mcp.streamable_http_app()
 
+# ── Minimal discovery endpoints (no OAuth flow) ────────────────────────────
 async def homepage(request: Request):
     return HTMLResponse("<h2>Webull MCP Server — running ✅</h2>")
 
@@ -105,7 +127,6 @@ async def oauth_protected_resource(request: Request):
     return JSONResponse({
         "resource":                 base,
         "authorization_servers":    [base],
-        "scopes_supported":         ["read", "write"],
         "bearer_methods_supported": ["header"],
     })
 
@@ -113,69 +134,61 @@ async def oauth_metadata(request: Request):
     base = f"https://{SERVER_URL}"
     return JSONResponse({
         "issuer":                                base,
-        "authorization_endpoint":               f"{base}/oauth/authorize",
-        "token_endpoint":                        f"{base}/oauth/token",
-        "registration_endpoint":                 f"{base}/oauth/register",
-        "response_types_supported":              ["code"],
-        "grant_types_supported":                 ["authorization_code", "refresh_token"],
-        "code_challenge_methods_supported":      ["S256"],
+        "token_endpoint":                        f"{base}/token",
+        "registration_endpoint":                 f"{base}/register",
+        "response_types_supported":              ["token"],
+        "grant_types_supported":                 ["client_credentials"],
         "token_endpoint_auth_methods_supported": ["none"],
     })
 
-async def oauth_register(request: Request):
-    body = await request.json()
-    client_id = "webull-" + str(uuid.uuid4())[:8]
+async def register(request: Request):
+    """Dynamic client registration — always succeeds, returns static client."""
     return JSONResponse({
-        "client_id":                  client_id,
-        "redirect_uris":              body.get("redirect_uris", []),
-        "grant_types":                ["authorization_code", "refresh_token"],
-        "response_types":             ["code"],
+        "client_id":                  "webull-mcp-client",
+        "grant_types":                ["client_credentials"],
         "token_endpoint_auth_method": "none",
     })
 
-async def oauth_authorize(request: Request):
-    redirect_uri = request.query_params.get("redirect_uri", "")
-    state        = request.query_params.get("state", "")
-    code         = "webull-code-" + str(uuid.uuid4())
-    return RedirectResponse(url=f"{redirect_uri}?code={code}&state={state}")
-
-async def oauth_token(request: Request):
+async def token(request: Request):
+    """Token endpoint — returns the static MCP_SECRET as the bearer token."""
     return JSONResponse({
-        "access_token":  "webull-token-" + str(uuid.uuid4()),
-        "token_type":    "bearer",
-        "expires_in":    86400,
-        "scope":         "read write",
-        "refresh_token": "webull-refresh-" + str(uuid.uuid4()),
+        "access_token": MCP_SECRET,
+        "token_type":   "bearer",
+        "expires_in":   315360000,  # 10 years
     })
 
+# ── Starlette app for discovery routes ────────────────────────────────────
 _oauth_app = Starlette(routes=[
-    Route("/", homepage, methods=["GET"]),
+    Route("/",                                     homepage,                methods=["GET"]),
     Route("/.well-known/oauth-protected-resource", oauth_protected_resource),
     Route("/.well-known/oauth-protected-resource/{path:path}", oauth_protected_resource),
     Route("/.well-known/oauth-authorization-server", oauth_metadata),
-    Route("/oauth/register",  oauth_register,  methods=["POST"]),
-    Route("/oauth/authorize", oauth_authorize, methods=["GET"]),
-    Route("/oauth/token",     oauth_token,     methods=["GET", "POST"]),
+    Route("/register",                             register,                methods=["POST"]),
+    Route("/token",                                token,                   methods=["POST"]),
 ])
 
-_OAUTH_PREFIXES = ("/.well-known/", "/oauth/")
+_OAUTH_PREFIXES = ("/.well-known/", "/register", "/token")
 
+# ── Top-level ASGI router ──────────────────────────────────────────────────
 async def app(scope, receive, send):
     if scope["type"] == "lifespan":
         await mcp_asgi(scope, receive, send)
         return
 
-    path = scope.get("path", "/")
+    path   = scope.get("path", "/")
+    method = scope.get("method", "POST") if scope["type"] == "http" else ""
 
-    # GET / → homepage; everything else at / and all non-OAuth paths → FastMCP
-    if scope["type"] == "http" and path == "/" and scope.get("method", "POST") == "GET":
+    # GET / → homepage
+    if path == "/" and method == "GET":
         await _oauth_app(scope, receive, send)
         return
 
+    # Discovery routes → Starlette
     if any(path.startswith(p) for p in _OAUTH_PREFIXES):
         await _oauth_app(scope, receive, send)
         return
 
+    # Everything else → FastMCP
     await mcp_asgi(scope, receive, send)
 
 if __name__ == "__main__":

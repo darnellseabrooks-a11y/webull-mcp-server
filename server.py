@@ -1,44 +1,32 @@
 import os
 import uuid
 import json
-import httpx
-import hmac
-import hashlib
-import base64
-from datetime import datetime, timezone
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, HTMLResponse
 from starlette.routing import Route
+from webull.core.client import ApiClient
+from webull.trade.trade_client import TradeClient
+from webull.quotes.quotes_client import QuotesClient
 import uvicorn
 
 # ── Env vars ───────────────────────────────────────────────────────────────
 APP_KEY    = os.environ.get("WEBULL_APP_KEY", "")
 APP_SECRET = os.environ.get("WEBULL_APP_SECRET", "")
 ACCOUNT_ID = os.environ.get("WEBULL_ACCOUNT_ID", "")
-BASE_URL   = os.environ.get("WEBULL_BASE_URL", "https://prod-openapi-alb.webullbroker.com")
 SERVER_URL = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "localhost:8000")
 MCP_SECRET = os.environ.get("MCP_SECRET", "")
 
-# ── Signing helper ─────────────────────────────────────────────────────────
-def sign(method: str, path: str, body_str: str = "") -> dict:
-    ts    = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    nonce = str(uuid.uuid4()).replace("-", "")
-    src   = "\n".join([method, path, ts, nonce, body_str])
-    sig   = base64.b64encode(
-        hmac.new(APP_SECRET.encode(), src.encode(), hashlib.sha1).digest()
-    ).decode()
-    return {
-        "Content-Type":          "application/json",
-        "x-app-key":             APP_KEY,
-        "x-signature":           sig,
-        "x-signature-algorithm": "HmacSHA1",
-        "x-signature-version":   "1",
-        "x-signature-nonce":     nonce,
-        "x-timestamp":           ts,
-    }
+# ── Webull SDK clients ─────────────────────────────────────────────────────
+def get_trade_client() -> TradeClient:
+    client = ApiClient(APP_KEY, APP_SECRET, "us")
+    return TradeClient(client)
+
+def get_quotes_client() -> QuotesClient:
+    client = ApiClient(APP_KEY, APP_SECRET, "us")
+    return QuotesClient(client)
 
 # ── FastMCP — DNS rebinding protection disabled for Railway proxy ──────────
 mcp = FastMCP(
@@ -52,67 +40,84 @@ mcp = FastMCP(
 @mcp.tool()
 def get_account_info() -> str:
     """Get Webull account balance and buying power."""
-    path = "/openapi/account/v2/account/list"
-    r = httpx.get(BASE_URL + path, headers=sign("GET", path), timeout=10)
-    return r.text
+    try:
+        tc = get_trade_client()
+        res = tc.account_v2.get_account_list()
+        return json.dumps(res.json(), indent=2)
+    except Exception as e:
+        return f"Error: {e}"
 
 @mcp.tool()
 def get_positions() -> str:
     """Get current stock and options positions."""
-    path = f"/openapi/account/v2/{ACCOUNT_ID}/positions"
-    r = httpx.get(BASE_URL + path, headers=sign("GET", path), timeout=10)
-    return r.text
+    try:
+        tc = get_trade_client()
+        res = tc.account_v2.get_positions(account_id=ACCOUNT_ID)
+        return json.dumps(res.json(), indent=2)
+    except Exception as e:
+        return f"Error: {e}"
 
 @mcp.tool()
 def get_quote(symbol: str) -> str:
     """Get real-time quote for a stock symbol e.g. AAPL, TSLA, SPY."""
-    path = f"/openapi/quote/v1/ticker/snapshot?symbols={symbol}"
-    r = httpx.get(BASE_URL + path, headers=sign("GET", path), timeout=10)
-    return r.text
+    try:
+        qc = get_quotes_client()
+        res = qc.market_data.get_snapshot(symbols=symbol, category="US_STOCK")
+        return json.dumps(res.json(), indent=2)
+    except Exception as e:
+        return f"Error: {e}"
 
 @mcp.tool()
 def get_options_chain(symbol: str, expiration: str = "") -> str:
     """Get options chain for a symbol. expiration format: YYYY-MM-DD"""
-    path = f"/openapi/quote/v1/option/chain?symbol={symbol}"
-    if expiration:
-        path += f"&expireDate={expiration}"
-    r = httpx.get(BASE_URL + path, headers=sign("GET", path), timeout=10)
-    return r.text
+    try:
+        qc = get_quotes_client()
+        params = {"symbol": symbol, "category": "US_OPTION"}
+        if expiration:
+            params["expireDate"] = expiration
+        res = qc.market_data.get_options_chain(**params)
+        return json.dumps(res.json(), indent=2)
+    except Exception as e:
+        return f"Error: {e}"
 
 @mcp.tool()
 def get_orders() -> str:
     """Get list of open and recent orders."""
-    path = f"/openapi/trade/v2/{ACCOUNT_ID}/orders?status=Working"
-    r = httpx.get(BASE_URL + path, headers=sign("GET", path), timeout=10)
-    return r.text
+    try:
+        tc = get_trade_client()
+        res = tc.order_v2.get_orders(account_id=ACCOUNT_ID, status="Working")
+        return json.dumps(res.json(), indent=2)
+    except Exception as e:
+        return f"Error: {e}"
 
 @mcp.tool()
 def place_order(symbol: str, action: str, quantity: int, order_type: str = "MKT", limit_price: float = 0.0) -> str:
     """Place a stock order. action=BUY or SELL, order_type=MKT or LMT."""
-    path = f"/openapi/trade/v2/{ACCOUNT_ID}/orders"
-    body = {
-        "symbol":    symbol,
-        "action":    action,
-        "orderType": order_type,
-        "quantity":  quantity,
-    }
-    if order_type == "LMT":
-        body["limitPrice"] = limit_price
-    body_str = json.dumps(body)
-    r = httpx.post(
-        BASE_URL + path,
-        headers=sign("POST", path, body_str),
-        content=body_str.encode(),
-        timeout=10,
-    )
-    return r.text
+    try:
+        tc = get_trade_client()
+        order = {
+            "symbol":      symbol,
+            "action":      action,
+            "order_type":  order_type,
+            "quantity":    quantity,
+            "time_in_force": "DAY",
+        }
+        if order_type == "LMT":
+            order["limit_price"] = str(limit_price)
+        res = tc.order_v2.place_order(account_id=ACCOUNT_ID, **order)
+        return json.dumps(res.json(), indent=2)
+    except Exception as e:
+        return f"Error: {e}"
 
 @mcp.tool()
 def cancel_order(order_id: str) -> str:
     """Cancel an open order by order ID."""
-    path = f"/openapi/trade/v2/{ACCOUNT_ID}/orders/{order_id}/cancel"
-    r = httpx.post(BASE_URL + path, headers=sign("POST", path), timeout=10)
-    return r.text
+    try:
+        tc = get_trade_client()
+        res = tc.order_v2.cancel_order(account_id=ACCOUNT_ID, client_order_id=order_id)
+        return json.dumps(res.json(), indent=2)
+    except Exception as e:
+        return f"Error: {e}"
 
 # FastMCP mounts internally at /mcp
 mcp_asgi = mcp.streamable_http_app()
@@ -186,17 +191,15 @@ async def app(scope, receive, send):
     path   = scope.get("path", "/")
     method = scope.get("method", "") if scope["type"] == "http" else ""
 
-    # GET / → homepage
     if path == "/" and method == "GET":
         await _meta_app(scope, receive, send)
         return
 
-    # Discovery / token routes → Starlette
     if any(path.startswith(p) for p in _META_PREFIXES):
         await _meta_app(scope, receive, send)
         return
 
-    # All MCP traffic → rewrite to /mcp where FastMCP listens
+    # Rewrite to /mcp where FastMCP listens
     scope = dict(scope)
     scope["path"]     = "/mcp"
     scope["raw_path"] = b"/mcp"

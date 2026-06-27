@@ -20,10 +20,7 @@ APP_SECRET = os.environ.get("WEBULL_APP_SECRET", "")
 ACCOUNT_ID = os.environ.get("WEBULL_ACCOUNT_ID", "")
 SERVER_URL = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "localhost:8000")
 MCP_SECRET = os.environ.get("MCP_SECRET", "")
-
-# Production base URLs
-TRADE_URL  = "https://api.webull.com"
-MARKET_URL = "https://api.webull.com"
+BASE_URL   = "https://api.webull.com"
 
 # ── Signing helper ─────────────────────────────────────────────────────────
 def sign(method: str, path: str, body_str: str = "") -> dict:
@@ -54,63 +51,67 @@ mcp = FastMCP(
 
 @mcp.tool()
 def get_account_info() -> str:
-    """Get Webull account balance and buying power."""
-    path = "/openapi/account/v2/account/list"
-    r = httpx.get(TRADE_URL + path, headers=sign("GET", path), timeout=10)
+    """Get Webull account list and info."""
+    path = "/openapi/account/list"
+    r = httpx.get(BASE_URL + path, headers=sign("GET", path), timeout=10)
     return r.text
 
 @mcp.tool()
 def get_positions() -> str:
     """Get current stock and options positions."""
-    path = f"/openapi/account/v2/{ACCOUNT_ID}/positions"
-    r = httpx.get(TRADE_URL + path, headers=sign("GET", path), timeout=10)
+    path = f"/openapi/assets/positions?account_id={ACCOUNT_ID}"
+    r = httpx.get(BASE_URL + path, headers=sign("GET", path), timeout=10)
     return r.text
 
 @mcp.tool()
 def get_quote(symbol: str) -> str:
     """Get real-time quote for a stock symbol e.g. AAPL, TSLA, SPY."""
-    path = f"/openapi/quote/v1/ticker/snapshot?symbols={symbol}&category=US_STOCK"
-    r = httpx.get(MARKET_URL + path, headers=sign("GET", path), timeout=10)
+    path = f"/openapi/quote/snapshot?symbols={symbol}&category=US_STOCK"
+    r = httpx.get(BASE_URL + path, headers=sign("GET", path), timeout=10)
     return r.text
 
 @mcp.tool()
 def get_options_chain(symbol: str, expiration: str = "") -> str:
     """Get options chain for a symbol. expiration format: YYYY-MM-DD"""
-    path = f"/openapi/quote/v1/option/chain?symbol={symbol}"
+    path = f"/openapi/quote/option/chain?symbol={symbol}"
     if expiration:
         path += f"&expireDate={expiration}"
-    r = httpx.get(MARKET_URL + path, headers=sign("GET", path), timeout=10)
+    r = httpx.get(BASE_URL + path, headers=sign("GET", path), timeout=10)
     return r.text
 
 @mcp.tool()
 def get_orders() -> str:
     """Get list of open and recent orders."""
-    path = f"/openapi/trade/v2/{ACCOUNT_ID}/orders?status=Working"
-    r = httpx.get(TRADE_URL + path, headers=sign("GET", path), timeout=10)
+    path = f"/openapi/trade/order/list?account_id={ACCOUNT_ID}&status=Working"
+    r = httpx.get(BASE_URL + path, headers=sign("GET", path), timeout=10)
     return r.text
 
 @mcp.tool()
 def place_order(symbol: str, action: str, quantity: int, order_type: str = "MKT", limit_price: float = 0.0) -> str:
     """Place a stock order. action=BUY or SELL, order_type=MKT or LMT."""
-    path = f"/openapi/trade/v2/{ACCOUNT_ID}/orders"
+    path = "/openapi/trade/order/place"
     body = {
-        "symbol":    symbol,
-        "action":    action,
-        "orderType": order_type,
-        "quantity":  quantity,
-        "timeInForce": "DAY",
+        "account_id":    ACCOUNT_ID,
+        "symbol":        symbol,
+        "side":          action,
+        "order_type":    order_type,
+        "qty":           str(quantity),
+        "time_in_force": "DAY",
+        "client_order_id": uuid.uuid4().hex,
     }
     if order_type == "LMT":
-        body["limitPrice"] = str(limit_price)
+        body["limit_price"] = str(limit_price)
     body_str = json.dumps(body)
-    r = httpx.post(TRADE_URL + path, headers=sign("POST", path, body_str), content=body_str.encode(), timeout=10)
+    r = httpx.post(BASE_URL + path, headers=sign("POST", path, body_str), content=body_str.encode(), timeout=10)
     return r.text
 
 @mcp.tool()
 def cancel_order(order_id: str) -> str:
-    """Cancel an open order by order ID."""
-    path = f"/openapi/trade/v2/{ACCOUNT_ID}/orders/{order_id}/cancel"
-    r = httpx.post(TRADE_URL + path, headers=sign("POST", path), timeout=10)
+    """Cancel an open order by client order ID."""
+    path = "/openapi/trade/order/cancel"
+    body = {"account_id": ACCOUNT_ID, "client_order_id": order_id}
+    body_str = json.dumps(body)
+    r = httpx.post(BASE_URL + path, headers=sign("POST", path, body_str), content=body_str.encode(), timeout=10)
     return r.text
 
 mcp_asgi = mcp.streamable_http_app()

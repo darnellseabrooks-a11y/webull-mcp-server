@@ -66,7 +66,7 @@ def get_positions() -> str:
 @mcp.tool()
 def get_quote(symbol: str) -> str:
     """Get real-time quote for a stock symbol e.g. AAPL, TSLA, SPY."""
-    path = f"/openapi/quote/snapshot?symbols={symbol}&category=US_STOCK"
+    path = f"/openapi/market-data/stock/snapshot?symbols={symbol}&category=US_STOCK"
     r = httpx.get(BASE_URL + path, headers=sign("GET", path), timeout=10)
     return r.text
 

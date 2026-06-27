@@ -2,4 +2,3 @@ mcp
 httpx
 uvicorn
 starlette
-webull-openapi-python-sdk

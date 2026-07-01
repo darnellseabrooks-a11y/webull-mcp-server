@@ -15,6 +15,20 @@ APP_SECRET = os.environ.get("WEBULL_APP_SECRET", "")
 ACCOUNT_ID = os.environ.get("WEBULL_ACCOUNT_ID", "")
 SERVER_URL = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "localhost:8000")
 MCP_SECRET = os.environ.get("MCP_SECRET", "")
+WEBULL_TOKEN = os.environ.get("WEBULL_TOKEN", "")
+
+# ── Write token to file so SDK can find it on startup ─────────────────────
+def init_token():
+    if WEBULL_TOKEN:
+        token_dir = "/app/conf"
+        os.makedirs(token_dir, exist_ok=True)
+        token_path = f"{token_dir}/token.txt"
+        # Token file format: token\nexpiry\nstatus
+        with open(token_path, "w") as f:
+            f.write(f"{WEBULL_TOKEN}\n9999999999999\nNORMAL\n")
+        print(f"Token written to {token_path}")
+
+init_token()
 
 # ── Webull SDK client (lazy init) ──────────────────────────────────────────
 _trade_client = None

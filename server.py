@@ -1,6 +1,20 @@
 import os
 import uuid
 import json
+
+# ── Write token file FIRST before any SDK imports ─────────────────────────
+_WEBULL_TOKEN = os.environ.get("WEBULL_TOKEN", "")
+_TOKEN_DIR = os.environ.get("WEBULL_OPENAPI_TOKEN_DIR", "/app/conf")
+
+if _WEBULL_TOKEN:
+    os.makedirs(_TOKEN_DIR, exist_ok=True)
+    _token_path = os.path.join(_TOKEN_DIR, "token.txt")
+    with open(_token_path, "w") as _f:
+        _f.write(f"{_WEBULL_TOKEN}\n9999999999999\nNORMAL\n")
+    print(f"[startup] Token written to {_token_path}")
+else:
+    print("[startup] WARNING: WEBULL_TOKEN not set")
+
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
@@ -15,20 +29,6 @@ APP_SECRET = os.environ.get("WEBULL_APP_SECRET", "")
 ACCOUNT_ID = os.environ.get("WEBULL_ACCOUNT_ID", "")
 SERVER_URL = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "localhost:8000")
 MCP_SECRET = os.environ.get("MCP_SECRET", "")
-WEBULL_TOKEN = os.environ.get("WEBULL_TOKEN", "")
-
-# ── Write token to file so SDK can find it on startup ─────────────────────
-def init_token():
-    if WEBULL_TOKEN:
-        token_dir = "/app/conf"
-        os.makedirs(token_dir, exist_ok=True)
-        token_path = f"{token_dir}/token.txt"
-        # Token file format: token\nexpiry\nstatus
-        with open(token_path, "w") as f:
-            f.write(f"{WEBULL_TOKEN}\n9999999999999\nNORMAL\n")
-        print(f"Token written to {token_path}")
-
-init_token()
 
 # ── Webull SDK client (lazy init) ──────────────────────────────────────────
 _trade_client = None
@@ -53,7 +53,7 @@ mcp = FastMCP(
 
 @mcp.tool()
 def get_account_info() -> str:
-    """Get Webull account list, balances and buying power."""
+    """Get Webull account list."""
     try:
         tc = get_trade_client()
         res = tc.account_v2.get_account_list()
@@ -117,9 +117,8 @@ def place_stock_order(
     """
     try:
         tc = get_trade_client()
-        client_order_id = uuid.uuid4().hex
         order = {
-            "client_order_id": client_order_id,
+            "client_order_id": uuid.uuid4().hex,
             "account_id": ACCOUNT_ID,
             "symbol": symbol,
             "side": side,
@@ -154,9 +153,8 @@ def place_option_order(
     """
     try:
         tc = get_trade_client()
-        client_order_id = uuid.uuid4().hex
         order = {
-            "client_order_id": client_order_id,
+            "client_order_id": uuid.uuid4().hex,
             "account_id": ACCOUNT_ID,
             "symbol": symbol,
             "side": side,

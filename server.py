@@ -1,4 +1,4 @@
-# v3 - corrected SDK method names
+# v4 - correct order structure confirmed via console testing
 import os
 import uuid
 import json
@@ -29,6 +29,23 @@ def get_trade_client():
         api_client = ApiClient(APP_KEY, APP_SECRET, "us")
         _trade_client = TradeClient(api_client)
     return _trade_client
+
+def build_stock_order(symbol, side, quantity, order_type="LIMIT", limit_price=0.0, time_in_force="DAY"):
+    order = {
+        "client_order_id":        uuid.uuid4().hex,
+        "combo_type":             "NORMAL",
+        "symbol":                 symbol,
+        "side":                   side,
+        "order_type":             order_type,
+        "entrust_type":           "QTY",
+        "quantity":               quantity,
+        "time_in_force":          time_in_force,
+        "market":                 "US",
+        "support_trading_session": "CORE",
+    }
+    if order_type == "LIMIT" and limit_price > 0:
+        order["limit_price"] = limit_price
+    return order
 
 # ── FastMCP ────────────────────────────────────────────────────────────────
 mcp = FastMCP(
@@ -95,33 +112,45 @@ def get_order_history(page_size: int = 20, start_date: str = "", end_date: str =
         return f"Error: {e}"
 
 @mcp.tool()
+def preview_stock_order(
+    symbol: str,
+    side: str,
+    quantity: int,
+    order_type: str = "LIMIT",
+    limit_price: float = 0.0,
+    time_in_force: str = "DAY"
+) -> str:
+    """Preview a stock order to see estimated cost before placing.
+    side: BUY or SELL
+    order_type: MARKET or LIMIT
+    time_in_force: DAY or GTC
+    """
+    try:
+        tc = get_trade_client()
+        order = build_stock_order(symbol, side, quantity, order_type, limit_price, time_in_force)
+        res = tc.order_v2.preview_order(ACCOUNT_ID, [order])
+        return json.dumps(res.json(), indent=2)
+    except Exception as e:
+        return f"Error: {e}"
+
+@mcp.tool()
 def place_stock_order(
     symbol: str,
     side: str,
     quantity: int,
-    order_type: str = "MKT",
+    order_type: str = "LIMIT",
     limit_price: float = 0.0,
     time_in_force: str = "DAY"
 ) -> str:
     """Place a stock or ETF order.
     side: BUY or SELL
-    order_type: MKT or LMT
+    order_type: MARKET or LIMIT
     time_in_force: DAY or GTC
     """
     try:
         tc = get_trade_client()
-        order = {
-            "client_order_id": uuid.uuid4().hex,
-            "account_id": ACCOUNT_ID,
-            "symbol": symbol,
-            "side": side,
-            "order_type": order_type,
-            "qty": str(quantity),
-            "time_in_force": time_in_force,
-        }
-        if order_type == "LMT" and limit_price > 0:
-            order["limit_price"] = str(limit_price)
-        res = tc.order_v2.place_order(ACCOUNT_ID, **order)
+        order = build_stock_order(symbol, side, quantity, order_type, limit_price, time_in_force)
+        res = tc.order_v2.place_order(ACCOUNT_ID, [order])
         return json.dumps(res.json(), indent=2)
     except Exception as e:
         return f"Error: {e}"
@@ -147,19 +176,22 @@ def place_option_order(
     try:
         tc = get_trade_client()
         order = {
-            "client_order_id": uuid.uuid4().hex,
-            "account_id": ACCOUNT_ID,
-            "symbol": symbol,
-            "side": side,
-            "order_type": "LMT",
-            "qty": str(quantity),
-            "time_in_force": "DAY",
-            "limit_price": str(limit_price),
-            "option_type": option_type,
-            "expire_date": expiry,
-            "strike_price": str(strike),
+            "client_order_id":        uuid.uuid4().hex,
+            "combo_type":             "NORMAL",
+            "symbol":                 symbol,
+            "side":                   side,
+            "order_type":             "LIMIT",
+            "entrust_type":           "QTY",
+            "quantity":               quantity,
+            "time_in_force":          "DAY",
+            "limit_price":            limit_price,
+            "market":                 "US",
+            "support_trading_session": "CORE",
+            "option_type":            option_type,
+            "expire_date":            expiry,
+            "strike_price":           strike,
         }
-        res = tc.order_v2.place_option(ACCOUNT_ID, **order)
+        res = tc.order_v2.place_option(ACCOUNT_ID, [order])
         return json.dumps(res.json(), indent=2)
     except Exception as e:
         return f"Error: {e}"
@@ -169,7 +201,7 @@ def cancel_order(order_id: str) -> str:
     """Cancel an open order by client order ID."""
     try:
         tc = get_trade_client()
-        res = tc.order_v2.cancel_order_v2(ACCOUNT_ID, client_order_id=order_id)
+        res = tc.order_v2.cancel_order(ACCOUNT_ID, client_order_id=order_id)
         return json.dumps(res.json(), indent=2)
     except Exception as e:
         return f"Error: {e}"

@@ -2,3 +2,4 @@ mcp
 uvicorn
 starlette
 webull-openapi-python-sdk
+webull-python-sdk-mdata

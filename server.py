@@ -1,21 +1,7 @@
+# v3 - corrected SDK method names
 import os
 import uuid
 import json
-
-# v2 - fresh deploy after 2FA disabled
-
-# ── Write token file FIRST before any SDK imports ─────────────────────────
-_WEBULL_TOKEN = os.environ.get("WEBULL_TOKEN", "")
-_TOKEN_DIR = os.environ.get("WEBULL_OPENAPI_TOKEN_DIR", "/app/conf")
-
-if _WEBULL_TOKEN:
-    os.makedirs(_TOKEN_DIR, exist_ok=True)
-    _token_path = os.path.join(_TOKEN_DIR, "token.txt")
-    with open(_token_path, "w") as _f:
-        _f.write(f"{_WEBULL_TOKEN}\n9999999999999\nNORMAL\n")
-    print(f"[startup] Token written to {_token_path}")
-else:
-    print("[startup] WARNING: WEBULL_TOKEN not set")
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -88,7 +74,7 @@ def get_orders() -> str:
     """Get list of open orders."""
     try:
         tc = get_trade_client()
-        res = tc.order_v2.get_open_orders(ACCOUNT_ID)
+        res = tc.order_v2.get_order_open(ACCOUNT_ID)
         return json.dumps(res.json(), indent=2)
     except Exception as e:
         return f"Error: {e}"
@@ -151,7 +137,7 @@ def place_option_order(
     option_type: CALL or PUT
     expiry: YYYY-MM-DD
     strike: strike price
-    limit_price: limit price for the option
+    limit_price: limit price for the option contract
     """
     try:
         tc = get_trade_client()
@@ -168,7 +154,7 @@ def place_option_order(
             "expire_date": expiry,
             "strike_price": str(strike),
         }
-        res = tc.order_v2.place_option_order(ACCOUNT_ID, **order)
+        res = tc.order_v2.place_option(ACCOUNT_ID, **order)
         return json.dumps(res.json(), indent=2)
     except Exception as e:
         return f"Error: {e}"
@@ -178,7 +164,7 @@ def cancel_order(order_id: str) -> str:
     """Cancel an open order by client order ID."""
     try:
         tc = get_trade_client()
-        res = tc.order_v2.cancel_order(ACCOUNT_ID, client_order_id=order_id)
+        res = tc.order_v2.cancel_order_v2(ACCOUNT_ID, client_order_id=order_id)
         return json.dumps(res.json(), indent=2)
     except Exception as e:
         return f"Error: {e}"

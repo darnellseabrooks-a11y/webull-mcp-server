@@ -80,11 +80,16 @@ def get_orders() -> str:
         return f"Error: {e}"
 
 @mcp.tool()
-def get_order_history(last_days: int = 7) -> str:
-    """Get order history for the last N days (default 7)."""
+def get_order_history(page_size: int = 20, start_date: str = "", end_date: str = "") -> str:
+    """Get order history. Dates format: YYYY-MM-DD"""
     try:
         tc = get_trade_client()
-        res = tc.order_v2.get_order_history(ACCOUNT_ID, last_days=last_days)
+        res = tc.order_v2.get_order_history(
+            ACCOUNT_ID,
+            page_size=page_size,
+            start_date=start_date or None,
+            end_date=end_date or None,
+        )
         return json.dumps(res.json(), indent=2)
     except Exception as e:
         return f"Error: {e}"

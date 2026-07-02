@@ -2,6 +2,8 @@ import os
 import uuid
 import json
 
+# v2 - fresh deploy after 2FA disabled
+
 # ── Write token file FIRST before any SDK imports ─────────────────────────
 _WEBULL_TOKEN = os.environ.get("WEBULL_TOKEN", "")
 _TOKEN_DIR = os.environ.get("WEBULL_OPENAPI_TOKEN_DIR", "/app/conf")

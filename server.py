@@ -99,6 +99,53 @@ def build_option_order(symbol, side, quantity, limit_price, expiry, strike, opti
         ],
     }
 
+def build_option_spread_order(symbol, long_strike, short_strike, quantity, limit_price, expiry, option_type="CALL", side="BUY"):
+    """Build a two-leg vertical spread order (e.g. bull call debit spread, bull put credit spread).
+    Confirmed against Webull's documented VERTICAL example on 2026-07-04.
+
+    side: order-level direction — 'BUY' for a net debit spread (e.g. bull call: buy lower
+          strike call, sell higher strike call), 'SELL' for a net credit spread.
+    long_strike: strike price of the leg you're buying (long)
+    short_strike: strike price of the leg you're selling (short)
+    Both legs share the same underlying symbol, expiry, and option_type.
+    """
+    return {
+        "client_order_id":  uuid.uuid4().hex,
+        "combo_type":       "NORMAL",
+        "option_strategy":  "VERTICAL",
+        "order_type":       "LIMIT",
+        "limit_price":      str(limit_price),
+        "quantity":         str(quantity),
+        "side":             side,
+        "time_in_force":    "DAY",
+        "entrust_type":     "QTY",
+        "instrument_type":  "OPTION",
+        "market":           "US",
+        "symbol":           symbol,
+        "legs": [
+            {
+                "side":               "BUY",
+                "quantity":           str(quantity),
+                "symbol":             symbol,
+                "strike_price":       f"{long_strike:.2f}",
+                "option_expire_date": expiry,
+                "instrument_type":    "OPTION",
+                "option_type":        option_type,
+                "market":             "US",
+            },
+            {
+                "side":               "SELL",
+                "quantity":           str(quantity),
+                "symbol":             symbol,
+                "strike_price":       f"{short_strike:.2f}",
+                "option_expire_date": expiry,
+                "instrument_type":    "OPTION",
+                "option_type":        option_type,
+                "market":             "US",
+            },
+        ],
+    }
+
 # ── FastMCP ────────────────────────────────────────────────────────────────
 mcp = FastMCP(
     "Webull Trading Assistant",
@@ -254,6 +301,62 @@ def place_option_order(
     try:
         tc = get_trade_client()
         order = build_option_order(symbol, side, quantity, limit_price, expiry, strike, option_type)
+        res = tc.order_v2.place_option(ACCOUNT_ID, [order])
+        return json.dumps(res.json(), indent=2)
+    except Exception as e:
+        return f"Error: {getattr(e, 'error_msg', str(e))}"
+
+@mcp.tool()
+def preview_option_spread(
+    symbol: str,
+    long_strike: float,
+    short_strike: float,
+    quantity: int,
+    limit_price: float,
+    expiry: str,
+    option_type: str = "CALL",
+    side: str = "BUY",
+) -> str:
+    """Preview a two-leg vertical spread (e.g. bull call debit spread) — no execution, returns estimated cost/fees.
+    symbol: underlying e.g. NVDA
+    long_strike: strike of the leg you're buying
+    short_strike: strike of the leg you're selling
+    limit_price: net debit (side=BUY) or net credit (side=SELL) for the spread
+    expiry: YYYY-MM-DD (same for both legs)
+    option_type: CALL or PUT (same for both legs)
+    side: BUY for a net debit spread (e.g. bull call), SELL for a net credit spread (e.g. bull put)
+    """
+    try:
+        tc = get_trade_client()
+        order = build_option_spread_order(symbol, long_strike, short_strike, quantity, limit_price, expiry, option_type, side)
+        res = tc.order_v2.preview_option(ACCOUNT_ID, [order])
+        return json.dumps(res.json(), indent=2)
+    except Exception as e:
+        return f"Error: {getattr(e, 'error_msg', str(e))}"
+
+@mcp.tool()
+def place_option_spread(
+    symbol: str,
+    long_strike: float,
+    short_strike: float,
+    quantity: int,
+    limit_price: float,
+    expiry: str,
+    option_type: str = "CALL",
+    side: str = "BUY",
+) -> str:
+    """Place a two-leg vertical spread (e.g. bull call debit spread).
+    symbol: underlying e.g. NVDA
+    long_strike: strike of the leg you're buying
+    short_strike: strike of the leg you're selling
+    limit_price: net debit (side=BUY) or net credit (side=SELL) for the spread
+    expiry: YYYY-MM-DD (same for both legs)
+    option_type: CALL or PUT (same for both legs)
+    side: BUY for a net debit spread (e.g. bull call), SELL for a net credit spread (e.g. bull put)
+    """
+    try:
+        tc = get_trade_client()
+        order = build_option_spread_order(symbol, long_strike, short_strike, quantity, limit_price, expiry, option_type, side)
         res = tc.order_v2.place_option(ACCOUNT_ID, [order])
         return json.dumps(res.json(), indent=2)
     except Exception as e:

@@ -362,6 +362,75 @@ def place_option_spread(
     except Exception as e:
         return f"Error: {getattr(e, 'error_msg', str(e))}"
 
+def _fetch_option_chain(symbol, min_dte=0, max_dte=45, strike_range_pct=0.15, option_type="", limit=100):
+    """Shared chain-fetch logic used by get_options_chain and get_spread_candidates."""
+    if not MASSIVE_API_KEY:
+        raise RuntimeError("MASSIVE_API_KEY (or POLYGON_API_KEY) not set in environment")
+
+    headers = {"Authorization": f"Bearer {MASSIVE_API_KEY}"}
+
+    prev_resp = requests.get(
+        f"{MASSIVE_BASE_URL}/v2/aggs/ticker/{symbol}/prev",
+        headers=headers,
+        timeout=10,
+    )
+    prev_resp.raise_for_status()
+    results = prev_resp.json().get("results", [])
+    if not results:
+        raise RuntimeError(f"no reference price found for {symbol}")
+    ref_price = results[0].get("c")
+    if not ref_price:
+        raise RuntimeError(f"could not parse reference price for {symbol}")
+
+    strike_lo = round(ref_price * (1 - strike_range_pct), 2)
+    strike_hi = round(ref_price * (1 + strike_range_pct), 2)
+
+    today = date.today()
+    exp_lo = (today + timedelta(days=min_dte)).isoformat()
+    exp_hi = (today + timedelta(days=max_dte)).isoformat()
+
+    params = {
+        "expiration_date.gte": exp_lo,
+        "expiration_date.lte": exp_hi,
+        "strike_price.gte": strike_lo,
+        "strike_price.lte": strike_hi,
+        "limit": min(limit, 250),
+        "sort": "strike_price",
+    }
+    if option_type:
+        params["contract_type"] = option_type.lower()
+
+    chain_resp = requests.get(
+        f"{MASSIVE_BASE_URL}/v3/snapshot/options/{symbol}",
+        headers=headers,
+        params=params,
+        timeout=15,
+    )
+    chain_resp.raise_for_status()
+    chain_data = chain_resp.json()
+
+    contracts = []
+    for r in chain_data.get("results", []):
+        details = r.get("details", {}) or {}
+        day = r.get("day", {}) or {}
+        greeks = r.get("greeks", {}) or {}
+        contracts.append({
+            "ticker": details.get("ticker"),
+            "strike": details.get("strike_price"),
+            "expiry": details.get("expiration_date"),
+            "type": details.get("contract_type"),
+            "open_interest": r.get("open_interest"),
+            "implied_volatility": r.get("implied_volatility"),
+            "delta": greeks.get("delta"),
+            "gamma": greeks.get("gamma"),
+            "theta": greeks.get("theta"),
+            "vega": greeks.get("vega"),
+            "day_close": day.get("close"),
+            "day_volume": day.get("volume"),
+        })
+
+    return ref_price, strike_lo, strike_hi, exp_lo, exp_hi, contracts
+
 @mcp.tool()
 def get_options_chain(
     symbol: str,
@@ -382,74 +451,9 @@ def get_options_chain(
     limit: max contracts to return (max 250 per Massive's API)
     """
     try:
-        if not MASSIVE_API_KEY:
-            return "Error: MASSIVE_API_KEY (or POLYGON_API_KEY) not set in environment"
-
-        headers = {"Authorization": f"Bearer {MASSIVE_API_KEY}"}
-
-        # Reference price from previous close (used only to bound the strike window;
-        # use get_webull_option_quotes / place/preview flows for live execution pricing).
-        prev_resp = requests.get(
-            f"{MASSIVE_BASE_URL}/v2/aggs/ticker/{symbol}/prev",
-            headers=headers,
-            timeout=10,
+        ref_price, strike_lo, strike_hi, exp_lo, exp_hi, contracts = _fetch_option_chain(
+            symbol, min_dte, max_dte, strike_range_pct, option_type, limit
         )
-        prev_resp.raise_for_status()
-        prev_data = prev_resp.json()
-        results = prev_data.get("results", [])
-        if not results:
-            return f"Error: no reference price found for {symbol}"
-        ref_price = results[0].get("c")
-        if not ref_price:
-            return f"Error: could not parse reference price for {symbol}"
-
-        strike_lo = round(ref_price * (1 - strike_range_pct), 2)
-        strike_hi = round(ref_price * (1 + strike_range_pct), 2)
-
-        today = date.today()
-        exp_lo = (today + timedelta(days=min_dte)).isoformat()
-        exp_hi = (today + timedelta(days=max_dte)).isoformat()
-
-        params = {
-            "expiration_date.gte": exp_lo,
-            "expiration_date.lte": exp_hi,
-            "strike_price.gte": strike_lo,
-            "strike_price.lte": strike_hi,
-            "limit": min(limit, 250),
-            "sort": "strike_price",
-        }
-        if option_type:
-            params["contract_type"] = option_type.lower()
-
-        chain_resp = requests.get(
-            f"{MASSIVE_BASE_URL}/v3/snapshot/options/{symbol}",
-            headers=headers,
-            params=params,
-            timeout=15,
-        )
-        chain_resp.raise_for_status()
-        chain_data = chain_resp.json()
-
-        contracts = []
-        for r in chain_data.get("results", []):
-            details = r.get("details", {}) or {}
-            day = r.get("day", {}) or {}
-            greeks = r.get("greeks", {}) or {}
-            contracts.append({
-                "ticker": details.get("ticker"),
-                "strike": details.get("strike_price"),
-                "expiry": details.get("expiration_date"),
-                "type": details.get("contract_type"),
-                "open_interest": r.get("open_interest"),
-                "implied_volatility": r.get("implied_volatility"),
-                "delta": greeks.get("delta"),
-                "gamma": greeks.get("gamma"),
-                "theta": greeks.get("theta"),
-                "vega": greeks.get("vega"),
-                "day_close": day.get("close"),
-                "day_volume": day.get("volume"),
-            })
-
         return json.dumps({
             "underlying": symbol,
             "reference_price": ref_price,
@@ -479,6 +483,137 @@ def get_webull_option_quotes(option_codes: str) -> str:
             return "Error: max 20 option codes per call"
         res = dc.option_market_data.get_option_snapshot(codes, "US_OPTION")
         return json.dumps(res.json(), indent=2)
+    except Exception as e:
+        return f"Error: {getattr(e, 'error_msg', str(e))}"
+
+@mcp.tool()
+def get_spread_candidates(
+    symbol: str,
+    min_dte: int = 20,
+    max_dte: int = 45,
+    strike_range_pct: float = 0.15,
+    option_type: str = "CALL",
+    long_delta_min: float = 0.3,
+    short_delta_min: float = 0.1,
+    rr_min: float = 0.33,
+    rr_max: float = 1.5,
+    max_strikes_per_expiry: int = 15,
+    top_n: int = 10,
+) -> str:
+    """Generate ranked vertical spread candidates (e.g. bull call debit spreads) for a symbol.
+    Pulls the chain via Massive, pairs strikes within the same expiry, prices each pair with
+    live Webull bid/ask, and filters/ranks using the same default criteria Barchart uses for
+    bull call spreads: long-leg delta > long_delta_min, short-leg delta > short_delta_min,
+    risk/reward between rr_min and rr_max.
+
+    symbol: underlying e.g. NVDA
+    min_dte/max_dte: days-to-expiration window for candidate expiries
+    strike_range_pct: how far above/below reference price to consider strikes
+    option_type: CALL (bull call debit spread) or PUT (bull put credit spread)
+    long_delta_min / short_delta_min: minimum abs delta for the long/short leg
+    rr_min/rr_max: acceptable max_loss/max_profit ratio window
+    max_strikes_per_expiry: cap on strikes considered per expiry (limits pair explosion)
+    top_n: number of ranked candidates to return
+    """
+    try:
+        from itertools import combinations
+
+        ref_price, strike_lo, strike_hi, exp_lo, exp_hi, contracts = _fetch_option_chain(
+            symbol, min_dte, max_dte, strike_range_pct, option_type, limit=200
+        )
+        if not contracts:
+            return json.dumps({"underlying": symbol, "candidates": [], "note": "no contracts found in range"}, indent=2)
+
+        # Group by expiry, cap strikes per expiry, sort by strike ascending
+        by_expiry = {}
+        for c in contracts:
+            by_expiry.setdefault(c["expiry"], []).append(c)
+        for exp in by_expiry:
+            by_expiry[exp] = sorted(by_expiry[exp], key=lambda c: c["strike"])[:max_strikes_per_expiry]
+
+        # Build candidate pairs (long < short, same expiry) passing delta prefilter
+        raw_candidates = []
+        for exp, strikes in by_expiry.items():
+            for long_c, short_c in combinations(strikes, 2):
+                long_delta = abs(long_c.get("delta") or 0)
+                short_delta = abs(short_c.get("delta") or 0)
+                if long_delta < long_delta_min or short_delta < short_delta_min:
+                    continue
+                raw_candidates.append((exp, long_c, short_c))
+
+        if not raw_candidates:
+            return json.dumps({"underlying": symbol, "candidates": [], "note": "no pairs passed delta filter"}, indent=2)
+
+        # Collect unique tickers needed for live Webull quotes, batch in groups of 20
+        tickers = set()
+        for _, long_c, short_c in raw_candidates:
+            tickers.add(long_c["ticker"])
+            tickers.add(short_c["ticker"])
+        tickers = list(tickers)
+
+        dc = get_data_client()
+        quotes = {}
+        for i in range(0, len(tickers), 20):
+            batch = [t.lstrip("O:") for t in tickers[i:i + 20]]
+            res = dc.option_market_data.get_option_snapshot(batch, "US_OPTION")
+            for q in res.json():
+                quotes[q.get("symbol")] = q
+
+        results = []
+        for exp, long_c, short_c in raw_candidates:
+            long_q = quotes.get(long_c["ticker"].lstrip("O:"))
+            short_q = quotes.get(short_c["ticker"].lstrip("O:"))
+            if not long_q or not short_q:
+                continue
+            try:
+                long_ask = float(long_q["ask"])
+                short_bid = float(short_q["bid"])
+            except (KeyError, ValueError, TypeError):
+                continue
+
+            net_debit = round(long_ask - short_bid, 2)
+            width = round(short_c["strike"] - long_c["strike"], 2)
+            if net_debit <= 0 or width <= 0:
+                continue
+            max_profit = round(width - net_debit, 2)
+            max_loss = net_debit
+            if max_profit <= 0:
+                continue
+            rr = round(max_loss / max_profit, 2)
+            if not (rr_min <= rr <= rr_max):
+                continue
+            breakeven = round(long_c["strike"] + net_debit, 2)
+
+            results.append({
+                "expiry": exp,
+                "long_strike": long_c["strike"],
+                "short_strike": short_c["strike"],
+                "long_delta": long_c.get("delta"),
+                "short_delta": short_c.get("delta"),
+                "net_debit": net_debit,
+                "max_profit": max_profit,
+                "max_loss": max_loss,
+                "breakeven": breakeven,
+                "risk_reward": rr,
+                "long_bid_ask": [long_q.get("bid"), long_q.get("ask")],
+                "short_bid_ask": [short_q.get("bid"), short_q.get("ask")],
+            })
+
+        results.sort(key=lambda r: r["risk_reward"])
+        return json.dumps({
+            "underlying": symbol,
+            "reference_price": ref_price,
+            "option_type": option_type,
+            "filters": {
+                "long_delta_min": long_delta_min,
+                "short_delta_min": short_delta_min,
+                "risk_reward_range": [rr_min, rr_max],
+            },
+            "candidate_count": len(results),
+            "candidates": results[:top_n],
+        }, indent=2)
+    except requests.exceptions.RequestException as e:
+        return f"Error calling Massive API: {e}"
     except Exception as e:
         return f"Error: {getattr(e, 'error_msg', str(e))}"
 

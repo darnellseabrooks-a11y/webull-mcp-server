@@ -163,10 +163,10 @@ def place_option_order(
     limit_price: float,
     expiry: str,
     strike: float,
-    option_type: str = "CALL"
+    option_type: str = "CALL",
 ) -> str:
     """Place a single-leg option order.
-    symbol: underlying e.g. SPY
+    symbol: underlying ticker e.g. SPY
     side: BUY or SELL
     option_type: CALL or PUT
     expiry: YYYY-MM-DD
@@ -176,25 +176,35 @@ def place_option_order(
     try:
         tc = get_trade_client()
         order = {
-            "client_order_id":        uuid.uuid4().hex,
-            "combo_type":             "NORMAL",
-            "symbol":                 symbol,
-            "side":                   side,
-            "order_type":             "LIMIT",
-            "entrust_type":           "QTY",
-            "quantity":               quantity,
-            "time_in_force":          "DAY",
-            "limit_price":            limit_price,
-            "market":                 "US",
-            "support_trading_session": "CORE",
-            "option_type":            option_type,
-            "expire_date":            expiry,
-            "strike_price":           strike,
+            "client_order_id": uuid.uuid4().hex,
+            "combo_type": "NORMAL",
+            "order_type": "LIMIT",
+            "limit_price": str(limit_price),
+            "quantity": str(quantity),
+            "option_strategy": "SINGLE",
+            "side": side,
+            "time_in_force": "DAY",
+            "entrust_type": "QTY",
+            "instrument_type": "OPTION",
+            "market": "US",
+            "symbol": symbol,
+            "legs": [
+                {
+                    "side": side,
+                    "quantity": str(quantity),
+                    "symbol": symbol,
+                    "strike_price": f"{strike:.2f}",
+                    "option_expire_date": expiry,
+                    "instrument_type": "OPTION",
+                    "option_type": option_type,
+                    "market": "US",
+                }
+            ],
         }
         res = tc.order_v2.place_option(ACCOUNT_ID, [order])
         return json.dumps(res.json(), indent=2)
     except Exception as e:
-        return f"Error: {e}"
+        return f"Error: {getattr(e, 'error_msg', str(e))}"
 
 @mcp.tool()
 def cancel_order(order_id: str) -> str:

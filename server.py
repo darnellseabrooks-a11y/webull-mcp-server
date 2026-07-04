@@ -1,4 +1,4 @@
-# v4 - correct order structure confirmed via console testing
+# v5 - fixed option order structure (confirmed via live preview_option test) + added preview_option_order
 import os
 import uuid
 import json
@@ -46,6 +46,41 @@ def build_stock_order(symbol, side, quantity, order_type="LIMIT", limit_price=0.
     if order_type == "LIMIT" and limit_price > 0:
         order["limit_price"] = limit_price
     return order
+
+def build_option_order(symbol, side, quantity, limit_price, expiry, strike, option_type="CALL"):
+    """Build a single-leg option order matching Webull's confirmed schema.
+    Field names/values verified live via preview_option on 2026-07-03:
+    - option_type must be 'CALL' / 'PUT' (NOT 'CALL_OPTION'/'PUT_OPTION')
+    - expiry field is 'option_expire_date' (NOT 'expire_date')
+    - order-level dict needs its own instrument_type/symbol IN ADDITION to the legs array
+    - quantity/limit_price/strike_price are sent as strings
+    """
+    return {
+        "client_order_id":  uuid.uuid4().hex,
+        "combo_type":       "NORMAL",
+        "order_type":       "LIMIT",
+        "limit_price":      str(limit_price),
+        "quantity":         str(quantity),
+        "option_strategy":  "SINGLE",
+        "side":             side,
+        "time_in_force":    "DAY",
+        "entrust_type":     "QTY",
+        "instrument_type":  "OPTION",
+        "market":           "US",
+        "symbol":           symbol,
+        "legs": [
+            {
+                "side":               side,
+                "quantity":           str(quantity),
+                "symbol":             symbol,
+                "strike_price":       f"{strike:.2f}",
+                "option_expire_date": expiry,
+                "instrument_type":    "OPTION",
+                "option_type":        option_type,
+                "market":             "US",
+            }
+        ],
+    }
 
 # ── FastMCP ────────────────────────────────────────────────────────────────
 mcp = FastMCP(
@@ -156,17 +191,17 @@ def place_stock_order(
         return f"Error: {e}"
 
 @mcp.tool()
-def place_option_order(
+def preview_option_order(
     symbol: str,
     side: str,
     quantity: int,
     limit_price: float,
     expiry: str,
     strike: float,
-    option_type: str = "CALL",
+    option_type: str = "CALL"
 ) -> str:
-    """Place a single-leg option order.
-    symbol: underlying ticker e.g. SPY
+    """Preview a single-leg option order (no execution) — returns estimated cost/fees.
+    symbol: underlying e.g. SPY
     side: BUY or SELL
     option_type: CALL or PUT
     expiry: YYYY-MM-DD
@@ -175,32 +210,33 @@ def place_option_order(
     """
     try:
         tc = get_trade_client()
-        order = {
-            "client_order_id": uuid.uuid4().hex,
-            "combo_type": "NORMAL",
-            "order_type": "LIMIT",
-            "limit_price": str(limit_price),
-            "quantity": str(quantity),
-            "option_strategy": "SINGLE",
-            "side": side,
-            "time_in_force": "DAY",
-            "entrust_type": "QTY",
-            "instrument_type": "OPTION",
-            "market": "US",
-            "symbol": symbol,
-            "legs": [
-                {
-                    "side": side,
-                    "quantity": str(quantity),
-                    "symbol": symbol,
-                    "strike_price": f"{strike:.2f}",
-                    "option_expire_date": expiry,
-                    "instrument_type": "OPTION",
-                    "option_type": option_type,
-                    "market": "US",
-                }
-            ],
-        }
+        order = build_option_order(symbol, side, quantity, limit_price, expiry, strike, option_type)
+        res = tc.order_v2.preview_option(ACCOUNT_ID, [order])
+        return json.dumps(res.json(), indent=2)
+    except Exception as e:
+        return f"Error: {getattr(e, 'error_msg', str(e))}"
+
+@mcp.tool()
+def place_option_order(
+    symbol: str,
+    side: str,
+    quantity: int,
+    limit_price: float,
+    expiry: str,
+    strike: float,
+    option_type: str = "CALL"
+) -> str:
+    """Place a single-leg option order.
+    symbol: underlying e.g. SPY
+    side: BUY or SELL
+    option_type: CALL or PUT
+    expiry: YYYY-MM-DD
+    strike: strike price
+    limit_price: limit price for the option contract
+    """
+    try:
+        tc = get_trade_client()
+        order = build_option_order(symbol, side, quantity, limit_price, expiry, strike, option_type)
         res = tc.order_v2.place_option(ACCOUNT_ID, [order])
         return json.dumps(res.json(), indent=2)
     except Exception as e:

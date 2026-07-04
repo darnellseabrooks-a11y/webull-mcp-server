@@ -1,8 +1,10 @@
-# v5 - fixed option order structure (confirmed via live preview_option test) + added preview_option_order
+# v6 - added get_options_chain (Massive/Polygon) + get_webull_option_quotes (Webull DataClient)
 import os
 import uuid
 import json
+from datetime import date, timedelta
 
+import requests
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
@@ -18,8 +20,14 @@ ACCOUNT_ID = os.environ.get("WEBULL_ACCOUNT_ID", "")
 SERVER_URL = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "localhost:8000")
 MCP_SECRET = os.environ.get("MCP_SECRET", "")
 
-# ── Webull SDK client (lazy init) ──────────────────────────────────────────
+# Massive/Polygon (options chain discovery). MASSIVE_API_KEY preferred;
+# POLYGON_API_KEY kept as a fallback since Massive's own libs support both names.
+MASSIVE_API_KEY = os.environ.get("MASSIVE_API_KEY") or os.environ.get("POLYGON_API_KEY", "")
+MASSIVE_BASE_URL = "https://api.massive.com"
+
+# ── Webull SDK clients (lazy init) ─────────────────────────────────────────
 _trade_client = None
+_data_client = None
 
 def get_trade_client():
     global _trade_client
@@ -29,6 +37,15 @@ def get_trade_client():
         api_client = ApiClient(APP_KEY, APP_SECRET, "us")
         _trade_client = TradeClient(api_client)
     return _trade_client
+
+def get_data_client():
+    global _data_client
+    if _data_client is None:
+        from webull.core.client import ApiClient
+        from webull.data.data_client import DataClient
+        api_client = ApiClient(APP_KEY, APP_SECRET, "us")
+        _data_client = DataClient(api_client)
+    return _data_client
 
 def build_stock_order(symbol, side, quantity, order_type="LIMIT", limit_price=0.0, time_in_force="DAY"):
     order = {
@@ -238,6 +255,126 @@ def place_option_order(
         tc = get_trade_client()
         order = build_option_order(symbol, side, quantity, limit_price, expiry, strike, option_type)
         res = tc.order_v2.place_option(ACCOUNT_ID, [order])
+        return json.dumps(res.json(), indent=2)
+    except Exception as e:
+        return f"Error: {getattr(e, 'error_msg', str(e))}"
+
+@mcp.tool()
+def get_options_chain(
+    symbol: str,
+    min_dte: int = 0,
+    max_dte: int = 45,
+    strike_range_pct: float = 0.15,
+    option_type: str = "",
+    limit: int = 100,
+) -> str:
+    """Discover an options chain for an underlying via Massive/Polygon.
+    Returns strikes/expiries/OI/greeks/IV for contracts near the money.
+    Use get_webull_option_quotes afterward for live Webull bid/ask on specific contracts.
+
+    symbol: underlying ticker e.g. SPY, QQQ
+    min_dte/max_dte: days-to-expiration window (default 0-45)
+    strike_range_pct: only return strikes within +/- this fraction of reference price (default 0.15 = 15%)
+    option_type: 'call', 'put', or '' for both
+    limit: max contracts to return (max 250 per Massive's API)
+    """
+    try:
+        if not MASSIVE_API_KEY:
+            return "Error: MASSIVE_API_KEY (or POLYGON_API_KEY) not set in environment"
+
+        headers = {"Authorization": f"Bearer {MASSIVE_API_KEY}"}
+
+        # Reference price from previous close (used only to bound the strike window;
+        # use get_webull_option_quotes / place/preview flows for live execution pricing).
+        prev_resp = requests.get(
+            f"{MASSIVE_BASE_URL}/v2/aggs/ticker/{symbol}/prev",
+            headers=headers,
+            timeout=10,
+        )
+        prev_resp.raise_for_status()
+        prev_data = prev_resp.json()
+        results = prev_data.get("results", [])
+        if not results:
+            return f"Error: no reference price found for {symbol}"
+        ref_price = results[0].get("c")
+        if not ref_price:
+            return f"Error: could not parse reference price for {symbol}"
+
+        strike_lo = round(ref_price * (1 - strike_range_pct), 2)
+        strike_hi = round(ref_price * (1 + strike_range_pct), 2)
+
+        today = date.today()
+        exp_lo = (today + timedelta(days=min_dte)).isoformat()
+        exp_hi = (today + timedelta(days=max_dte)).isoformat()
+
+        params = {
+            "expiration_date.gte": exp_lo,
+            "expiration_date.lte": exp_hi,
+            "strike_price.gte": strike_lo,
+            "strike_price.lte": strike_hi,
+            "limit": min(limit, 250),
+            "sort": "strike_price",
+        }
+        if option_type:
+            params["contract_type"] = option_type.lower()
+
+        chain_resp = requests.get(
+            f"{MASSIVE_BASE_URL}/v3/snapshot/options/{symbol}",
+            headers=headers,
+            params=params,
+            timeout=15,
+        )
+        chain_resp.raise_for_status()
+        chain_data = chain_resp.json()
+
+        contracts = []
+        for r in chain_data.get("results", []):
+            details = r.get("details", {}) or {}
+            day = r.get("day", {}) or {}
+            greeks = r.get("greeks", {}) or {}
+            contracts.append({
+                "ticker": details.get("ticker"),
+                "strike": details.get("strike_price"),
+                "expiry": details.get("expiration_date"),
+                "type": details.get("contract_type"),
+                "open_interest": r.get("open_interest"),
+                "implied_volatility": r.get("implied_volatility"),
+                "delta": greeks.get("delta"),
+                "gamma": greeks.get("gamma"),
+                "theta": greeks.get("theta"),
+                "vega": greeks.get("vega"),
+                "day_close": day.get("close"),
+                "day_volume": day.get("volume"),
+            })
+
+        return json.dumps({
+            "underlying": symbol,
+            "reference_price": ref_price,
+            "strike_range": [strike_lo, strike_hi],
+            "expiry_range": [exp_lo, exp_hi],
+            "contract_count": len(contracts),
+            "contracts": contracts,
+        }, indent=2)
+    except requests.exceptions.RequestException as e:
+        return f"Error calling Massive API: {e}"
+    except Exception as e:
+        return f"Error: {e}"
+
+@mcp.tool()
+def get_webull_option_quotes(option_codes: str) -> str:
+    """Get live Webull bid/ask/greeks for specific option contracts (real execution pricing).
+    Feed this the 'ticker' values from get_options_chain results (strip the leading 'O:' prefix,
+    e.g. 'O:SPY260706C00500000' -> 'SPY260706C00500000').
+
+    option_codes: comma-separated Webull option codes, up to 20 per call
+                  e.g. 'SPY260706C00500000,SPY260706C00505000'
+    """
+    try:
+        dc = get_data_client()
+        codes = [c.strip().lstrip("O:") for c in option_codes.split(",") if c.strip()]
+        if len(codes) > 20:
+            return "Error: max 20 option codes per call"
+        res = dc.option_market_data.get_option_snapshot(codes, "US_OPTION")
         return json.dumps(res.json(), indent=2)
     except Exception as e:
         return f"Error: {getattr(e, 'error_msg', str(e))}"
